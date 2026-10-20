@@ -208,7 +208,8 @@ reconciled on foreground connection. Explicit task cancellation does not generat
 a failure alert. Answered, finished, deleted or obsolete connection-scoped input
 requests are not sent from the queue.
 
-Send test notification offers all three alert types for the latest chat and this
+Send test notification offers all three alert types for the last opened chat (or
+the latest chat if none has been opened) and this
 device only, delayed ten seconds so Goose can be closed. Tests are visibly labeled
 and never run a model or tool. Validate actual APNs acceptance separately from a
 physical iPhone displaying the alert and opening the correct saved chat, including

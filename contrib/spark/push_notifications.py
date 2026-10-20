@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import time
@@ -204,6 +205,9 @@ class PushNotifications:
 
     async def run(self):
         import httpx
+        # HTTP request URLs contain the private Apple device token.
+        logging.getLogger('httpx').setLevel(logging.WARNING)
+        logging.getLogger('httpcore').setLevel(logging.WARNING)
         async with httpx.AsyncClient(http2=True, timeout=15) as client:
             while True:
                 self.wake.clear()
