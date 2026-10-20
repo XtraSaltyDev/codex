@@ -254,6 +254,8 @@ class Bridge:
                 args = {'threadId': identity, 'clientUserMessageId': request, 'input': [{'type': 'text', 'text': text}]}
                 if review:
                     args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly'}})
+                elif self.metadata['sessions'].get(identity, {}).get('fullAccess', False):
+                    args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'dangerFullAccess'}})
                 else:
                     args.update({'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': [thread['cwd']], 'networkAccess': True, 'excludeTmpdirEnvVar': False, 'excludeSlashTmp': False}})
                 try:
@@ -403,6 +405,9 @@ class Bridge:
     async def ensure_loaded(self, identity, include_turns=False):
         if identity not in self.loaded:
             result = await self.rpc.request('thread/resume', {'threadId': identity, 'excludeTurns': not include_turns})
+            if result.get('sandbox', {}).get('type') == 'dangerFullAccess':
+                self.metadata['sessions'].setdefault(identity, {})['fullAccess'] = True
+                self.save()
             self.loaded.add(identity)
             return result['thread']
         try:
@@ -456,10 +461,10 @@ class Bridge:
                 cwd = Path(workspace.get('path') or params['cwd']).expanduser().resolve(strict=True)
                 if not cwd.is_dir():
                     raise RPCError('Choose an existing directory on ai-research.')
-            response = await self.rpc.request('thread/start', {'cwd': str(cwd), 'approvalPolicy': 'on-request', 'sandbox': 'workspace-write', 'historyMode': 'legacy'})
+            response = await self.rpc.request('thread/start', {'cwd': str(cwd), 'approvalPolicy': 'never', 'sandbox': 'danger-full-access', 'historyMode': 'legacy'})
             thread = response['thread']; identity = thread['id']
             self.loaded.add(identity); self.clients[ws].add(identity)
-            self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd)}
+            self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd), 'fullAccess': True}
             if workspace['kind'] == 'project' and str(cwd) not in self.metadata['projects']:
                 self.metadata['projects'].append(str(cwd))
             self.save()

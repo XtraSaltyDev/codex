@@ -139,6 +139,29 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             await restored.start_prompt(self.phone, 'thread-a', 'append a record', 'uncertain')
         self.assertEqual(restored.journal.submission('uncertain')['text'], 'append a record')
 
+    async def test_new_chat_keeps_full_access_after_adapter_restart(self):
+        async def create(method, params):
+            self.assertEqual(method, 'thread/start')
+            self.assertEqual(params['sandbox'], 'danger-full-access')
+            self.assertEqual(params['approvalPolicy'], 'never')
+            return {'thread': {'id': 'full-access', 'cwd': self.temp.name}}
+        self.bridge.rpc.request = create
+        result = await self.bridge.dispatch(self.phone, 'session/new', {'cwd': self.temp.name})
+        identity = result['sessionId']
+        restored = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token')
+        self.addCleanup(restored.journal.close); restored.clients[self.phone] = {identity}
+        async def loaded(thread, include_turns=False):
+            return {'cwd': self.temp.name, 'status': {'type': 'idle'}}
+        async def request(method, params):
+            self.assertEqual(params['sandboxPolicy'], {'type': 'dangerFullAccess'})
+            self.assertEqual(params['approvalPolicy'], 'never')
+            turn = {'id': 'full-turn', 'status': 'completed', 'items': []}
+            await restored.event({'method': 'turn/started', 'params': {'threadId': identity, 'turn': {**turn, 'status': 'inProgress'}}})
+            await restored.event({'method': 'turn/completed', 'params': {'threadId': identity, 'turn': turn}})
+            return {'turn': turn}
+        restored.ensure_loaded = loaded; restored.rpc.request = request
+        self.assertEqual((await restored.start_prompt(self.phone, identity, 'inspect', 'full-request'))['stopReason'], 'end_turn')
+
     async def test_backend_restart_preserves_partial_output_and_marks_uncertain_action(self):
         turn = {'id': 'crashed', 'status': 'inProgress', 'items': [
             {'type': 'agentMessage', 'id': 'partial', 'text': 'Saved partial output'},
@@ -170,6 +193,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.turns['thread-a']['items'][0]['text'], 'Recent output')
 
     async def test_recovery_review_uses_read_only_sandbox_and_never_approves_tools(self):
+        self.bridge.metadata['sessions']['thread-a'] = {'fullAccess': True}
         saved = {'id': 'crashed', 'status': 'backendInterrupted', 'items': []}
         self.bridge.journal.save_turn('thread-a', saved)
         async def loaded(identity, include_turns=False):

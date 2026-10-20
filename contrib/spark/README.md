@@ -37,7 +37,9 @@ The setup discovers the served model and context limit through `/v1/models`. It 
 - `~/.codex-spark/`: configuration, model metadata, sessions, and history separate from `~/.codex`.
 - A **Codex Spark** application-menu launcher.
 
-The model catalog selects plain function tools and terminal-based file editing. Code Mode, hosted web search, reasoning summaries, automatic child agents, ChatGPT app integrations, and plugin marketplace auto-loading are disabled in this baseline. Normal shell commands and workspace edits retain the Codex sandbox and approval policy, with outbound networking enabled by `[sandbox_workspace_write] network_access = true`. The model uses terminal tools such as `curl` or Python to retrieve current sources and cite their URLs; OpenAI-hosted web search is not implemented by the Spark provider. These choices are editable in the isolated runtime's configuration. This config does not grant a local model capabilities it cannot implement.
+New threads default to full access: `sandbox_mode = "danger-full-access"` and `approval_policy = "never"`. Commands run with the Linux user's filesystem and network permissions, without Codex approval prompts. Existing loaded threads keep their current policy; recovery reviews remain read-only with networking disabled.
+
+The model catalog selects plain function tools and terminal-based file editing. Code Mode, hosted web search, reasoning summaries, automatic child agents, ChatGPT app integrations, and plugin marketplace auto-loading are disabled in this baseline. The model uses terminal tools such as `curl` or Python to retrieve current sources and cite their URLs; OpenAI-hosted web search is not implemented by the Spark provider. `[sandbox_workspace_write] network_access = true` also preserves networking when workspace mode is explicitly selected. These choices are editable in the isolated runtime's configuration. This config does not grant a local model capabilities it cannot implement.
 
 ```sh
 systemctl --user status codex-spark-tunnel codex-spark-app-server

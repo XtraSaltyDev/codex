@@ -13,7 +13,7 @@ import urllib.request
 
 
 NETWORK_INSTRUCTIONS = (
-    'For ordinary workspace-write tasks, outbound Internet access is enabled. '
+    'For ordinary tasks, outbound Internet access is enabled. '
     'For recent events and other time-sensitive facts, use terminal tools such as '
     'curl or Python urllib to retrieve current sources, inspect publication dates, '
     'and cite the source URLs. News RSS feeds can help discover current reporting. '
@@ -103,8 +103,8 @@ model_provider = "spark"
 model_catalog_json = {json.dumps(str(runtime / 'models.json'))}
 model_context_window = {context}
 model_auto_compact_token_limit = {min(200000, int(context * 0.80))}
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
 web_search = "disabled"
 developer_instructions = {json.dumps(NETWORK_INSTRUCTIONS)}
 
