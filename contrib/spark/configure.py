@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import urllib.request
 
+from install_client import with_default_cwd
+
 
 NETWORK_INSTRUCTIONS = (
     'For ordinary tasks, outbound Internet access is enabled. '
@@ -152,7 +154,7 @@ enabled = false
     server = launchers / 'codex-spark-server'
     write(server, '#!/bin/sh\nexec ' + quote(str(raw)) + f' app-server --strict-config --listen ws://127.0.0.1:{args.port} --ws-auth capability-token --ws-token-file ' + quote(str(token)) + ' "$@"\n', 0o755)
     client = launchers / 'codex-spark'
-    write(client, '#!/bin/sh\nset -eu\nCODEX_SPARK_REMOTE_TOKEN=$(cat ' + quote(str(token)) + ')\nexport CODEX_SPARK_REMOTE_TOKEN\nexec ' + quote(str(raw)) + f' --remote ws://127.0.0.1:{args.port} --remote-auth-token-env CODEX_SPARK_REMOTE_TOKEN "$@"\n', 0o755)
+    write(client, with_default_cwd('#!/bin/sh\nset -eu\nCODEX_SPARK_REMOTE_TOKEN=$(cat ' + quote(str(token)) + ')\nexport CODEX_SPARK_REMOTE_TOKEN\nexec ' + quote(str(raw)) + f' --remote ws://127.0.0.1:{args.port} --remote-auth-token-env CODEX_SPARK_REMOTE_TOKEN "$@"\n'), 0o755)
     from install_diagnostics import install as install_diagnostics
     install_diagnostics()
     unit = home / '.config/systemd/user/codex-spark-app-server.service'

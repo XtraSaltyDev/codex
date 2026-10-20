@@ -48,6 +48,18 @@ journalctl --user -u codex-spark-app-server -n 50
 ~/.local/bin/codex-spark-cli --version
 ```
 
+From a terminal, `codex-spark` starts new chats in the terminal's current working
+directory, even though execution uses the persistent app-server. An explicit
+`--cd /path/to/project` or `-C /path/to/project` overrides that default. The
+application-menu shortcut opens the fork's project directory explicitly.
+
+To update an existing terminal launcher without changing the model profile or
+restarting any services, run:
+
+```sh
+python3 contrib/spark/install_client.py
+```
+
 Reach the terminal client over SSH when using another computer. The model runs on Spark; shell commands and repository edits run on the Linux development host. Files on a Mac need a Mac runtime or an explicit copy/checkout on Linux.
 
 ## Health diagnostics
