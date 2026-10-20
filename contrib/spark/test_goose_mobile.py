@@ -19,6 +19,121 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    def seed_deletion_state(self):
+        for identity in ('thread-a', 'keep'):
+            self.bridge.metadata['sessions'][identity] = {'cwd': '/tmp/' + identity}
+            self.bridge.journal.prepare('request-' + identity, identity, 'saved draft')
+            self.bridge.journal.save_turn(identity, {'id': 'turn-' + identity, 'status': 'completed', 'items': []})
+            self.bridge.journal.db.execute('INSERT INTO events(thread,packet) VALUES(?,?)', (identity, '{}'))
+            self.bridge.journal.prepare_review('request-' + identity, identity, {'root': '/tmp/' + identity})
+            self.bridge.turns[identity] = {'id': 'turn-' + identity, 'status': 'completed', 'items': []}
+            self.bridge.loaded.add(identity)
+        self.bridge.save()
+
+    def assert_deletion_state(self, deleted):
+        for identity in ('thread-a', 'keep'):
+            count = 0 if identity == 'thread-a' and deleted else 1
+            self.assertEqual(identity in self.bridge.metadata['sessions'], bool(count))
+            for table in ('turns', 'submissions', 'events', 'work_reviews'):
+                self.assertEqual(self.bridge.journal.db.execute(f'SELECT count(*) FROM {table} WHERE thread=?', (identity,)).fetchone()[0], count)
+
+    async def test_missing_chat_delete_is_idempotent_after_verifying_all_index_pages(self):
+        self.seed_deletion_state()
+        calls = []
+        async def request(method, params):
+            calls.append((method, params))
+            if method == 'thread/delete':
+                raise RPCError('no rollout found for thread id thread-a', -32600)
+            if method == 'thread/loaded/list':
+                return {'data': []}
+            self.assertEqual(method, 'thread/list')
+            self.assertTrue(params['useStateDbOnly'])
+            self.assertIn('subAgent', params['sourceKinds'])
+            if not params['archived'] and not params.get('cursor'):
+                return {'data': [{'id': 'keep'}], 'nextCursor': 'next-page'}
+            return {'data': []}
+        self.bridge.rpc.request = request
+        for _ in range(2):
+            self.assertEqual(await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'}), {})
+        self.assert_deletion_state(True)
+        self.assertNotIn('thread-a', self.bridge.loaded)
+        self.assertNotIn('thread-a', self.bridge.turns)
+        self.assertNotIn('thread-a', self.bridge.clients[self.phone])
+        self.assertEqual(sum(method == 'thread/list' and params['archived'] for method, params in calls), 2)
+        restarted = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token')
+        self.addCleanup(restarted.journal.close)
+        self.assertNotIn('thread-a', restarted.metadata['sessions'])
+
+    async def test_missing_rollout_does_not_delete_loaded_indexed_or_archived_work(self):
+        self.seed_deletion_state()
+        for location in ('loaded', 'active-first', 'active-next', 'archived'):
+            with self.subTest(location=location):
+                async def request(method, params):
+                    if method == 'thread/delete':
+                        raise RPCError('no rollout found for thread id thread-a', -32600)
+                    if method == 'thread/loaded/list':
+                        return {'data': ['thread-a'] if location == 'loaded' else []}
+                    if (location == 'active-first' and not params['archived']) or (location == 'archived' and params['archived']) or (location == 'active-next' and params.get('cursor')):
+                        return {'data': [{'id': 'thread-a'}]}
+                    return {'data': [], 'nextCursor': 'page-two' if location == 'active-next' and not params['archived'] else None}
+                self.bridge.rpc.request = request
+                with self.assertRaisesRegex(RPCError, 'no rollout'):
+                    await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+                self.assert_deletion_state(False)
+
+    async def test_delete_preserves_saved_work_on_unrelated_errors_and_unknown_confirmation(self):
+        self.seed_deletion_state()
+        for message, code in [('Permission denied', -32603), ('no rollout found for thread id different-chat', -32600), ('no rollout found for thread id thread-a', -32000)]:
+            with self.subTest(message=message, code=code):
+                async def request(method, params):
+                    self.assertEqual(method, 'thread/delete')
+                    raise RPCError(message, code)
+                self.bridge.rpc.request = request
+                with self.assertRaises(RPCError):
+                    await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+                self.assert_deletion_state(False)
+        async def disconnected(method, params):
+            raise RPCError('thread not found: thread-a' if method == 'thread/delete' else 'Connection interrupted', -32600 if method == 'thread/delete' else -32000)
+        self.bridge.rpc.request = disconnected
+        with self.assertRaisesRegex(RPCError, 'Connection interrupted'):
+            await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+        self.assert_deletion_state(False)
+
+    async def test_delete_keeps_saved_work_when_index_cursor_repeats(self):
+        self.seed_deletion_state()
+        async def request(method, params):
+            if method == 'thread/delete':
+                raise RPCError('thread not found: thread-a', -32600)
+            return {'data': []} if method == 'thread/loaded/list' else {'data': [], 'nextCursor': 'same'}
+        self.bridge.rpc.request = request
+        with self.assertRaisesRegex(RPCError, 'Could not verify'):
+            await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+        self.assert_deletion_state(False)
+
+    async def test_normal_delete_cleans_all_recovery_data_but_archive_does_not(self):
+        self.seed_deletion_state()
+        async def request(method, params):
+            if method == 'thread/archive':
+                raise RPCError('no rollout found for thread id thread-a', -32600)
+            self.assertEqual(method, 'thread/delete')
+            return {}
+        self.bridge.rpc.request = request
+        with self.assertRaises(RPCError):
+            await self.bridge.dispatch(self.phone, '_goose/unstable/session/archive', {'sessionId': 'thread-a'})
+        self.assert_deletion_state(False)
+        await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+        self.assert_deletion_state(True)
+
+    async def test_running_chat_cannot_be_deleted(self):
+        self.seed_deletion_state()
+        self.bridge.waiters['thread-a'] = asyncio.get_running_loop().create_future()
+        async def request(method, params):
+            self.fail('Must not contact the backend while this chat is running')
+        self.bridge.rpc.request = request
+        with self.assertRaisesRegex(RPCError, 'Stop the running task'):
+            await self.bridge.dispatch(self.phone, 'session/delete', {'sessionId': 'thread-a'})
+        self.assert_deletion_state(False)
+
     async def test_remote_folder_browser_lists_only_directories_and_resolves_navigation(self):
         root = Path(self.temp.name).resolve()
         (root / 'Zulu').mkdir()

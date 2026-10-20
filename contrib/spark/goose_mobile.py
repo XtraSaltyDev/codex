@@ -497,6 +497,33 @@ class Bridge:
                 return (await self.rpc.request('thread/read', {'threadId': identity}))['thread']
             raise
 
+    async def confirm_deleted_thread(self, identity, error):
+        missing_messages = {f'no rollout found for thread id {identity}',
+                            f'thread not found: {identity}', f'thread not loaded: {identity}'}
+        if error.code not in (-32600, -32602) or str(error) not in missing_messages:
+            raise error
+        if identity in (await self.rpc.request('thread/loaded/list', {}))['data']:
+            raise error
+        # A missing rollout alone does not establish that indexed or archived work is gone.
+        for archived in (False, True):
+            cursor = None
+            seen = set()
+            while True:
+                args = {'archived': archived, 'limit': 100, 'modelProviders': [], 'useStateDbOnly': True,
+                        'sourceKinds': ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+                                        'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown']}
+                if cursor:
+                    args['cursor'] = cursor
+                page = await self.rpc.request('thread/list', args)
+                if any(thread['id'] == identity for thread in page['data']):
+                    raise error
+                cursor = page.get('nextCursor')
+                if not cursor:
+                    break
+                if cursor in seen:
+                    raise RPCError('Could not verify that this chat was deleted. Reconnect and try again.', -32000)
+                seen.add(cursor)
+
     async def dispatch(self, ws, method, params):
         identity = params.get('sessionId')
         if method == '_goose/unstable/health':
@@ -633,14 +660,21 @@ class Bridge:
             if identity in self.waiters:
                 raise RPCError('Stop the running task first.')
             action = method.rsplit('/', 1)[-1]
-            await self.rpc.request('thread/' + action, {'threadId': identity})
+            try:
+                await self.rpc.request('thread/' + action, {'threadId': identity})
+            except RPCError as error:
+                if action != 'delete':
+                    raise
+                await self.confirm_deleted_thread(identity, error)
             self.loaded.discard(identity)
             if action == 'delete':
                 self.metadata['sessions'].pop(identity, None)
+                self.turns.pop(identity, None)
+                for subscriptions in self.clients.values():
+                    subscriptions.discard(identity)
                 with self.journal.db:
-                    self.journal.db.execute('DELETE FROM turns WHERE thread=?', (identity,))
-                    self.journal.db.execute('DELETE FROM submissions WHERE thread=?', (identity,))
-                    self.journal.db.execute('DELETE FROM events WHERE thread=?', (identity,))
+                    for table in ('turns', 'submissions', 'events', 'work_reviews'):
+                        self.journal.db.execute(f'DELETE FROM {table} WHERE thread=?', (identity,))
             elif action == 'archive':
                 self.metadata['sessions'].setdefault(identity, {})['archivedAt'] = iso()
             else:

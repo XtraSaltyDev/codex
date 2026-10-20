@@ -45,6 +45,13 @@ stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
 
+Deleting an already-missing backend chat also clears its stale phone draft. A missing-rollout
+error is accepted only after confirming the ID is neither loaded nor indexed in any page
+of active or archived chats, across all source kinds and providers. Indexed work, transport
+failures and permission errors preserve the local draft and recovery data. Successful deletion
+also removes that chat's saved turns, submissions, events and file-review records; project
+files are untouched.
+
 The authenticated workspaces RPC advertises `workspaceBrowsing` and `workspaceCreation`.
 `browse` lists host directories (200 per page), with canonical current path, parent,
 home, and optional hidden entries. `createFolder` creates one child of the selected
