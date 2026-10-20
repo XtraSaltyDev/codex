@@ -124,6 +124,9 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.bridge.start_prompt(self.phone, 'thread-a', 'write once', 'request-a'))['stopReason'], 'end_turn')
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1]['clientUserMessageId'], 'request-a')
+        self.assertEqual(calls[0][1]['sandboxPolicy']['type'], 'workspaceWrite')
+        self.assertEqual(calls[0][1]['sandboxPolicy']['writableRoots'], ['/tmp'])
+        self.assertTrue(calls[0][1]['sandboxPolicy']['networkAccess'])
         with self.assertRaises(RPCError):
             await self.bridge.start_prompt(self.phone, 'thread-a', 'different action', 'request-a')
 

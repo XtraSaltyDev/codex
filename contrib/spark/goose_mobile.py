@@ -255,7 +255,7 @@ class Bridge:
                 if review:
                     args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly'}})
                 else:
-                    args.update({'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': [thread['cwd']], 'networkAccess': False, 'excludeTmpdirEnvVar': False, 'excludeSlashTmp': False}})
+                    args.update({'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': [thread['cwd']], 'networkAccess': True, 'excludeTmpdirEnvVar': False, 'excludeSlashTmp': False}})
                 try:
                     response = await self.rpc.request('turn/start', args)
                     turn = response['turn']

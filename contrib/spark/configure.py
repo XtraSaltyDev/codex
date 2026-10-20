@@ -12,6 +12,19 @@ import subprocess
 import urllib.request
 
 
+NETWORK_INSTRUCTIONS = (
+    'For ordinary workspace-write tasks, outbound Internet access is enabled. '
+    'For recent events and other time-sensitive facts, use terminal tools such as '
+    'curl or Python urllib to retrieve current sources, inspect publication dates, '
+    'and cite the source URLs. News RSS feeds can help discover current reporting. '
+    'The Spark provider does not supply OpenAI-hosted web_search; its absence does '
+    'not mean terminal network access is unavailable. Attempt a relevant fetch '
+    'before reporting a connectivity limitation, and describe the actual failure. '
+    'Always obey the effective turn sandbox: recovery reviews remain read-only '
+    'with network disabled and must not repeat previous actions.'
+)
+
+
 def write(path, contents, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_text() != contents:
@@ -93,6 +106,10 @@ model_auto_compact_token_limit = {min(200000, int(context * 0.80))}
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 web_search = "disabled"
+developer_instructions = {json.dumps(NETWORK_INSTRUCTIONS)}
+
+[sandbox_workspace_write]
+network_access = true
 
 [model_providers.spark]
 name = "DGX Spark"

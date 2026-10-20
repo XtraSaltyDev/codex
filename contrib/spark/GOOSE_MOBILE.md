@@ -52,6 +52,11 @@ use legacy history mode for full ACP transcript replay. Model execution remains 
 the existing Spark provider. This adapter does not advertise a model picker; change
 the backend model through the isolated Codex Spark configuration.
 
+Ordinary mobile turns explicitly enable outbound networking inside the workspace
+sandbox, matching the direct CLI profile. Current information can be retrieved with
+terminal tools (`curl` or Python); the Spark provider does not implement OpenAI-hosted
+web search. Recovery review turns keep their read-only, network-disabled policy.
+
 Disconnecting or closing the phone does not cancel host work. Reopening a running
 thread replays its current output and pending approvals; prompts are never retried
 automatically. An adapter restart rejoins the existing Codex turn. A backend crash
