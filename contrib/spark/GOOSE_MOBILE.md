@@ -60,6 +60,14 @@ retain full access. Current information can be retrieved with terminal tools (`c
 or Python); the Spark provider does not implement OpenAI-hosted web search. Recovery
 review turns keep their read-only, network-disabled policy.
 
+The initialize response includes a whitelisted `agentCapabilities._meta.goose.backend`
+descriptor: Codex identity, execution hostname, configured model/provider, and new-chat
+access defaults. Per-chat `_meta.goose.sessionSettings` accompanies new/load/list and
+submission-receipt updates, preserving actual model IDs and ordinary-turn access.
+Recovery reviews retain their separate restricted policy. No provider credentials or
+inference URLs are included. `workspaceAssignment: false` lets clients hide project
+move controls while still offering project discovery and new chats in project folders.
+
 Disconnecting or closing the phone does not cancel host work. Reopening a running
 thread replays its current output and pending approvals; prompts are never retried
 automatically. An adapter restart rejoins the existing Codex turn. A backend crash

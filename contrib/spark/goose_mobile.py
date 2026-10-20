@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import socket
 import sys
 import uuid
 
@@ -152,6 +153,7 @@ class Bridge:
         self.tasks = set()
         self.locks = {}
         self.stream_locks = {}
+        self.backend = {}
         self.root = self.state / 'chats'
         self.root.mkdir(exist_ok=True)
 
@@ -179,6 +181,7 @@ class Bridge:
         for identity in identities:
             try:
                 result = await self.rpc.call('thread/resume', {'threadId': identity})
+                self.remember_settings(result)
                 thread = result['thread']; self.loaded.add(identity)
             except RPCError as error:
                 if not any(word in str(error).lower() for word in ('not found', 'no rollout', 'no session', 'does not exist', 'not materialized', 'not loaded')):
@@ -220,7 +223,7 @@ class Bridge:
 
     async def acknowledge(self, identity, request):
         if request:
-            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'acceptedRequestId': request}}})
+            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'acceptedRequestId': request, 'sessionSettings': self.session_settings(identity)}}})
 
     async def start_prompt(self, ws, identity, text, request, review=False):
         async with self.locks.setdefault(identity, asyncio.Lock()):
@@ -397,17 +400,30 @@ class Bridge:
 
     def session(self, thread, archived=False):
         meta = dict(self.metadata['sessions'].get(thread['id'], {}))
+        meta['goose'] = {'sessionSettings': self.session_settings(thread['id'])}
         meta.setdefault('workspace', {'kind': 'project', 'path': thread['cwd']})
         if archived:
             meta.setdefault('archivedAt', iso(thread['updatedAt']))
         return {'sessionId': thread['id'], 'cwd': thread['cwd'], 'title': thread.get('name') or thread.get('preview') or 'New chat', 'updatedAt': iso(thread['updatedAt']), '_meta': meta}
 
+    def session_settings(self, identity):
+        meta = self.metadata['sessions'].get(identity, {})
+        full = meta.get('fullAccess', False)
+        return {'access': 'full' if full else 'workspace', 'networkAccess': True,
+                'approvalPolicy': 'never' if full else 'on-request', 'modelId': meta.get('modelId')}
+
+    def remember_settings(self, result):
+        meta = self.metadata['sessions'].setdefault(result['thread']['id'], {})
+        if result.get('model'):
+            meta['modelId'] = result['model']
+        if result.get('sandbox', {}).get('type') == 'dangerFullAccess':
+            meta['fullAccess'] = True
+        self.save()
+
     async def ensure_loaded(self, identity, include_turns=False):
         if identity not in self.loaded:
             result = await self.rpc.request('thread/resume', {'threadId': identity, 'excludeTurns': not include_turns})
-            if result.get('sandbox', {}).get('type') == 'dangerFullAccess':
-                self.metadata['sessions'].setdefault(identity, {})['fullAccess'] = True
-                self.save()
+            self.remember_settings(result)
             self.loaded.add(identity)
             return result['thread']
         try:
@@ -421,9 +437,17 @@ class Bridge:
         identity = params.get('sessionId')
         if method == 'initialize':
             await asyncio.wait_for(self.rpc.ready.wait(), 15)
+            config = (await self.rpc.request('config/read', {'includeLayers': False}))['config']
+            provider = config.get('model_provider', '')
+            self.backend = {'kind': 'codex', 'name': 'Codex Spark', 'agentName': 'Codex',
+                            'executionHost': socket.gethostname(), 'modelId': config.get('model'),
+                            'providerName': config.get('model_providers', {}).get(provider, {}).get('name', provider),
+                            'defaultAccess': {'danger-full-access': 'full', 'workspace-write': 'workspace', 'read-only': 'readOnly'}.get(config.get('sandbox_mode')),
+                            'approvalPolicy': config.get('approval_policy')}
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
-                                          '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True, 'customNotifications': True}}}}
+                                          '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
+                                                              'workspaceAssignment': False, 'backend': self.backend, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
             if action == 'add':
@@ -465,10 +489,11 @@ class Bridge:
             thread = response['thread']; identity = thread['id']
             self.loaded.add(identity); self.clients[ws].add(identity)
             self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd), 'fullAccess': True}
+            self.remember_settings(response)
             if workspace['kind'] == 'project' and str(cwd) not in self.metadata['projects']:
                 self.metadata['projects'].append(str(cwd))
             self.save()
-            return {'sessionId': identity, '_meta': {'workingDir': str(cwd), 'workspace': workspace}}
+            return {'sessionId': identity, '_meta': {'workingDir': str(cwd), 'workspace': workspace, 'goose': {'sessionSettings': self.session_settings(identity)}}}
         if method == 'session/load':
             self.loading.add((ws, identity))
             try:
@@ -490,7 +515,8 @@ class Bridge:
                         if pending['packet']['params']['threadId'] == identity:
                             await self.deliver_permission(key, only=ws)
                     return {'_meta': {'hostRuns': [self.status(t) for t in turns], 'workspace': self.session(thread)['_meta']['workspace'],
-                                      'goose': {'acceptedRequests': [r['id'] for r in self.journal.for_thread(identity) if r['phase'] in ('accepted', 'finished')]}}}
+                                      'goose': {'sessionSettings': self.session_settings(identity),
+                                                'acceptedRequests': [r['id'] for r in self.journal.for_thread(identity) if r['phase'] in ('accepted', 'finished')]}}}
             finally:
                 self.loading.discard((ws, identity))
         if method == 'session/prompt':

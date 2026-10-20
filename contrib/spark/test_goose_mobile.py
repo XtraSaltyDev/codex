@@ -18,6 +18,31 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initialize_reports_backend_without_exposing_provider_credentials(self):
+        self.bridge.rpc.ready.set()
+        async def request(method, params):
+            self.assertEqual(method, 'config/read')
+            return {'config': {'model': 'provider/model-a', 'model_provider': 'spark',
+                               'model_providers': {'spark': {'name': 'DGX Spark', 'api_key': 'private-key'}},
+                               'sandbox_mode': 'danger-full-access', 'approval_policy': 'never'}}
+        self.bridge.rpc.request = request
+        result = await self.bridge.dispatch(self.phone, 'initialize', {})
+        meta = result['agentCapabilities']['_meta']['goose']
+        self.assertEqual(meta['backend']['modelId'], 'provider/model-a')
+        self.assertEqual(meta['backend']['defaultAccess'], 'full')
+        self.assertEqual(meta['backend']['providerName'], 'DGX Spark')
+        self.assertFalse(meta['workspaceAssignment'])
+        self.assertNotIn('private-key', str(result))
+        self.assertNotIn('api_key', str(result))
+
+    def test_existing_chat_does_not_inherit_new_full_access_default(self):
+        self.bridge.backend = {'defaultAccess': 'full', 'modelId': 'host-default'}
+        self.assertEqual(self.bridge.session_settings('thread-a')['access'], 'workspace')
+        self.assertIsNone(self.bridge.session_settings('thread-a')['modelId'])
+        self.bridge.remember_settings({'thread': {'id': 'thread-a'}, 'model': 'existing-model', 'sandbox': {'type': 'workspaceWrite'}})
+        self.assertEqual(self.bridge.session_settings('thread-a')['modelId'], 'existing-model')
+        self.assertEqual(self.bridge.session_settings('thread-a')['access'], 'workspace')
+
     def test_hydrated_user_message_keeps_its_original_stream_identity(self):
         native = [{'type': 'userMessage', 'id': 'item-1', 'clientId': 'same-request', 'content': []}]
         saved = [{'type': 'userMessage', 'id': 'stream-id', 'clientId': 'same-request', 'content': []}]
