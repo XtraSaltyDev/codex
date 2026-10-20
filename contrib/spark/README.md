@@ -50,7 +50,39 @@ journalctl --user -u codex-spark-app-server -n 50
 
 Reach the terminal client over SSH when using another computer. The model runs on Spark; shell commands and repository edits run on the Linux development host. Files on a Mac need a Mac runtime or an explicit copy/checkout on Linux.
 
-## Live acceptance
+## Health diagnostics
+
+```sh
+codex-spark doctor
+codex-spark doctor --json
+codex-spark doctor --live
+codex-spark doctor --live --mobile-url ws://10.66.66.1:3284/acp
+```
+
+`doctor` checks the three user services, authenticates to the app-server, queries the
+effective provider's model catalog, and checks journal integrity, private permissions,
+write access and free disk space. Routine checks do not start turns or run inference.
+`--live` adds one read-only terminal marker command in a new diagnostic chat, checks
+the successful recorded tool result and durable submission receipt, disconnects,
+reloads saved history and archives the finished fixture. The total live deadline is
+90 seconds by default (`--timeout 10` through `--timeout 180`). A failure returns the
+diagnostic session ID; it never resends the prompt or retries a tool action. Unfinished
+fixtures remain available for inspection. Exit status is 0 for passing checks and 1
+when attention is needed. A successful catalog check alone does not prove inference.
+
+Install diagnostics on an existing host without rewriting the profile or restarting
+the native runtime:
+
+```sh
+python3 contrib/spark/install_diagnostics.py
+```
+
+This installs the shared Python 3.11+ helper and its isolated aiohttp dependency and
+adds the `doctor` subcommand before the launcher's normal token read, so it can diagnose
+missing credentials. Normal terminal arguments continue to go to the remote client.
+New installations include it through `configure.py` and `configure_goose_mobile.py`.
+
+## Coding acceptance
 
 Install the test client's dependency into an isolated directory, then run:
 

@@ -45,6 +45,20 @@ stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
 
+The adapter advertises `healthStatus: true`. Goose polls the authenticated `/status`
+endpoint while foregrounded and shows the same service, authenticated Codex, model
+availability and saved-work checks as `codex-spark doctor`. Tap the library health row
+or open Backend details to see individual results and refresh them. HTTP 503 retains
+the structured failure report; missing/wrong mobile credentials return 401. Status
+responses contain no inference URLs or credentials, use `Cache-Control: no-store`,
+and are briefly cached on the host to coalesce simultaneous readers. The ACP method
+`_goose/unstable/health` exposes the same read-only report to authenticated clients.
+Health never runs a live test, resends a message, or changes draft/submission state.
+The phone checks HTTP independently of its ACP connection so a running adapter can
+explain a Codex outage. An unreachable host is reported with a private/VPN connection
+hint; the app does not pretend it can determine that the VPN itself is disconnected.
+Older hosts without this capability retain the existing connection behavior.
+
 Supports streaming text, command/file activity, explicit allow-once/decline approvals,
 user-input forms, stop, history replay, saved-message search, rename, archive/restore,
 delete, project folders, and fresh projectless workspaces. Mobile-created Codex threads

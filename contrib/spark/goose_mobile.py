@@ -16,6 +16,7 @@ import uuid
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
 from mobile_state import MobileState, merge_items
+from health import SparkHealth
 
 
 class RPCError(Exception):
@@ -154,6 +155,7 @@ class Bridge:
         self.locks = {}
         self.stream_locks = {}
         self.backend = {}
+        self.health_probe = SparkHealth(state=self.state, upstream_url=upstream_url)
         self.root = self.state / 'chats'
         self.root.mkdir(exist_ok=True)
 
@@ -435,6 +437,8 @@ class Bridge:
 
     async def dispatch(self, ws, method, params):
         identity = params.get('sessionId')
+        if method == '_goose/unstable/health':
+            return await self.health_probe.collect()
         if method == 'initialize':
             await asyncio.wait_for(self.rpc.ready.wait(), 15)
             config = (await self.rpc.request('config/read', {'includeLayers': False}))['config']
@@ -447,7 +451,7 @@ class Bridge:
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
-                                                              'workspaceAssignment': False, 'backend': self.backend, 'customNotifications': True}}}}
+                                                              'workspaceAssignment': False, 'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
             if action == 'add':
@@ -611,7 +615,10 @@ class Bridge:
         return ws
 
     async def health(self, request):
-        return web.json_response({'status': 'ok' if self.rpc.ready.is_set() else 'unavailable', 'backend': 'Codex Spark'}, status=200 if self.rpc.ready.is_set() else 503)
+        if not hmac.compare_digest(request.headers.get('X-Secret-Key', ''), self.token):
+            raise web.HTTPUnauthorized()
+        result = await self.health_probe.collect()
+        return web.json_response(result, status=200 if result['status'] == 'ok' else 503, headers={'Cache-Control': 'no-store'})
 
 
 def app(bridge):

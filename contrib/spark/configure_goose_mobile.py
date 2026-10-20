@@ -11,6 +11,8 @@ token = home / '.config/codex-spark/mobile.token'
 if not (home / '.config/codex-spark/server.token').is_file():
     raise SystemExit('Configure the Codex Spark app-server first.')
 subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--target', str(home / '.local/share/codex-spark/mobile-python'), '-r', str(source / 'requirements-mobile.txt')], check=True)
+from install_diagnostics import install as install_diagnostics
+install_diagnostics()
 if not token.exists():
     token.write_text(secrets.token_urlsafe(32) + '\n')
 token.chmod(0o600)
