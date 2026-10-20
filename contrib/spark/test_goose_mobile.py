@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from goose_mobile import Bridge, RPCError, item_update, run_status
 from mobile_state import merge_items
@@ -49,6 +50,9 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(merge_items(native, saved), saved)
 
     def setUp(self):
+        review = patch('goose_mobile.capture_review', return_value={'unavailable': True})
+        review.start()
+        self.addCleanup(review.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)

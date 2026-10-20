@@ -45,6 +45,30 @@ stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
 
+Completed mobile runs include an inline changed-files summary, per-file added/removed
+line counts and saved unified diffs. Tap a file to inspect its captured diff. The
+baseline is the working tree at task start, including pre-existing dirty/untracked
+files, so unchanged earlier edits are excluded. Shell edits and changes committed
+during the task are captured too. Renames appear as delete/add entries. Git projects
+include tracked and non-ignored files; ordinary folders use bounded snapshots and
+exclude generated folders and credential files. Edits outside the project and
+external-service changes are outside this file review's scope. Overlapping work,
+interrupted captures and size limits are labeled as partial rather than attributed
+with false certainty. Snapshot files are never applied or restored to the project.
+
+Command activity now includes the recorded output and exit code. Nonzero exits are
+shown as failed commands even when the surrounding turn succeeds. Output is capped
+at 24 KiB, common credential forms and terminal control sequences are filtered, and
+truncation or unconfirmed outcomes are explicit. This does not infer that an
+unexecuted test passed. Existing stored command results can be replayed; old runs
+without before-task snapshots do not gain invented file diffs.
+
+Private baseline/result records live in the existing recovery SQLite database's
+`work_reviews` table. Baseline contents are removed after saving the bounded result.
+The `workReview` field on host-run metadata and `_meta.goose.commandResult` on tool
+updates survive normal reconnects and adapter restarts. A recovery capture after an
+interruption is marked partial, and never repeats a prompt, tool action or file edit.
+
 The adapter advertises `healthStatus: true`. Goose polls the authenticated `/status`
 endpoint while foregrounded and shows the same service, authenticated Codex, model
 availability and saved-work checks as `codex-spark doctor`. Tap the library health row

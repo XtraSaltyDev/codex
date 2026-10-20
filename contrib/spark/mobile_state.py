@@ -14,6 +14,8 @@ def merge_items(native, saved):
         merged = {**previous, **item}
         if len(previous.get('text', '')) > len(item.get('text', '')):
             merged['text'] = previous['text']
+        if len(previous.get('aggregatedOutput') or '') > len(item.get('aggregatedOutput') or ''):
+            merged['aggregatedOutput'] = previous['aggregatedOutput']
         if previous.get('status') == 'completed' and item.get('status') == 'inProgress':
             merged.update({k: v for k, v in previous.items() if k != 'id'})
         items[key] = merged
@@ -40,6 +42,9 @@ class MobileState:
             );
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY, thread TEXT NOT NULL, packet TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS work_reviews (
+                request TEXT PRIMARY KEY, thread TEXT NOT NULL, baseline TEXT, result TEXT
             );
         ''')
 
@@ -87,7 +92,8 @@ class MobileState:
         items = {i['id']: i for i in turn.get('items', [])}
         if method.startswith('turn/'):
             incoming = params['turn']
-            for item in incoming.get('items', []): items[item['id']] = item
+            for item in incoming.get('items', []):
+                items[item['id']] = merge_items([items[item['id']]], [item])[0] if item['id'] in items else item
             turn.update({k: v for k, v in incoming.items() if k != 'items'})
         elif method == 'item/agentMessage/delta':
             item = items.setdefault(params['itemId'], {'id': params['itemId'], 'type': 'agentMessage', 'text': ''})
@@ -116,3 +122,25 @@ class MobileState:
 
     def close(self):
         self.db.close()
+
+    def prepare_review(self, request, thread, baseline):
+        with self.db:
+            for row in self.db.execute('SELECT request,baseline FROM work_reviews WHERE result IS NULL AND baseline IS NOT NULL').fetchall():
+                other = json.loads(row['baseline'])
+                if other.get('root') and other.get('root') == baseline.get('root'):
+                    baseline['overlap'] = True
+                    other['overlap'] = True
+                    self.db.execute('UPDATE work_reviews SET baseline=? WHERE request=?', (json.dumps(other), row['request']))
+            self.db.execute('INSERT OR IGNORE INTO work_reviews(request,thread,baseline) VALUES(?,?,?)', (request, thread, json.dumps(baseline)))
+
+    def pending_review(self, turn):
+        row = self.db.execute('SELECT w.* FROM work_reviews w JOIN submissions s ON s.id=w.request WHERE (s.turn=? OR (s.turn IS NULL AND s.id=?)) AND w.result IS NULL', (turn, turn)).fetchone()
+        return {**dict(row), 'baseline': json.loads(row['baseline'])} if row else None
+
+    def finish_review(self, request, result):
+        with self.db:
+            self.db.execute('UPDATE work_reviews SET result=?,baseline=NULL WHERE request=?', (json.dumps(result), request))
+
+    def review_result(self, turn):
+        row = self.db.execute('SELECT w.result FROM work_reviews w JOIN submissions s ON s.id=w.request WHERE s.turn=?', (turn,)).fetchone()
+        return json.loads(row['result']) if row and row['result'] else None

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
 from mobile_state import MobileState, merge_items
 from health import SparkHealth
+from work_review import capture as capture_review, finish as finish_review, visible_text
 
 
 class RPCError(Exception):
@@ -45,11 +46,17 @@ def item_update(item, completed=True):
                 'messageId': identity, 'content': {'type': 'text', 'text': text}}
     if kind in ('commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch'):
         title = item.get('command') or item.get('tool') or ('Edit ' + ', '.join(c.get('path', '') for c in item.get('changes', [])) if kind == 'fileChange' else kind)
-        if item.get('_mobileUncertain'):
-            return {'sessionUpdate': 'tool_call_update', 'toolCallId': identity, 'title': 'Outcome unconfirmed: ' + title, 'status': 'failed'}
+        uncertain = bool(item.get('_mobileUncertain'))
+        if uncertain:
+            title = 'Outcome unconfirmed: ' + title
         completed = completed and item.get('status') != 'inProgress'
-        return {'sessionUpdate': 'tool_call_update' if completed else 'tool_call', 'toolCallId': identity,
-                'title': title, 'status': ('failed' if item.get('status') in ('failed', 'declined') else 'completed') if completed else 'in_progress'}
+        update = {'sessionUpdate': 'tool_call_update' if completed else 'tool_call', 'toolCallId': identity,
+                  'title': visible_text(title, 4096)[0], 'status': 'failed' if uncertain or item.get('status') in ('failed', 'declined') or item.get('exitCode') not in (None, 0) else 'completed' if completed else 'in_progress'}
+        if kind == 'commandExecution':
+            output, truncated = visible_text(item.get('aggregatedOutput') or '')
+            update['_meta'] = {'goose': {'commandResult': {'output': output, 'exitCode': item.get('exitCode'),
+                               'truncated': truncated, 'uncertain': bool(item.get('_mobileUncertain'))}}}
+        return update
     return None
 
 
@@ -161,6 +168,9 @@ class Bridge:
 
     def status(self, turn):
         status = run_status(turn)
+        result = self.journal.review_result(turn['id'])
+        if result is not None:
+            status['workReview'] = result
         if turn['status'] == 'backendInterrupted':
             record = next((r for r in self.journal.turns() if r['id'] == turn['id']), None)
             tools = [i for i in turn.get('items', []) if item_update(i) and i['type'] not in ('userMessage', 'agentMessage')]
@@ -201,6 +211,7 @@ class Bridge:
                     checkpoint = {'id': submission['id'], 'status': 'backendInterrupted', 'items': [{'id': submission['id'], 'type': 'userMessage', 'content': [{'type': 'text', 'text': submission['text']}]}]}
                     self.journal.save_turn(identity, checkpoint)
                     self.journal.phase(submission['id'], 'unconfirmed')
+                    await self.complete_review(checkpoint, interrupted=True)
             for record in self.journal.turns(identity):
                 saved = record['snapshot']
                 if saved['status'] != 'inProgress':
@@ -220,6 +231,8 @@ class Bridge:
                             item['_mobileUncertain'] = True
                 self.turns[identity] = current
                 self.journal.save_turn(identity, current)
+                if current['status'] != 'inProgress':
+                    await self.complete_review(current, interrupted=True)
                 if record['stopped'] and active:
                     await self.rpc.call('turn/interrupt', {'threadId': identity, 'turnId': current['id']})
 
@@ -253,6 +266,8 @@ class Bridge:
                 active = self.turns.get(identity)
                 if identity in self.waiters or (active and active['status'] == 'inProgress') or thread.get('status', {}).get('type') == 'active':
                     raise RPCError('This conversation already has a running task. Reconnect to follow it.', -32000)
+                baseline = await asyncio.to_thread(capture_review, thread['cwd'])
+                self.journal.prepare_review(request, identity, baseline)
                 future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
                 self.inflight[identity] = request
                 self.journal.phase(request, 'dispatching')
@@ -282,6 +297,12 @@ class Bridge:
         temporary.write_text(json.dumps(self.metadata, indent=2) + '\n')
         temporary.chmod(0o600)
         temporary.replace(self.metadata_path)
+
+    async def complete_review(self, turn, interrupted=False):
+        pending = self.journal.pending_review(turn['id'])
+        if pending:
+            result = await asyncio.to_thread(finish_review, pending['baseline'], interrupted)
+            self.journal.finish_review(pending['request'], result)
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -353,6 +374,7 @@ class Bridge:
                 for item in turn.get('items', []):
                     if item.get('status') == 'inProgress': item['_mobileUncertain'] = True
                 self.journal.save_turn(identity, turn)
+            await self.complete_review(turn, interrupted=turn['status'] != 'completed')
             for request in self.journal.for_thread(identity):
                 if request['turn'] == turn['id'] and turn['status'] != 'backendInterrupted':
                     self.journal.phase(request['id'], 'finished', turn['id'])
