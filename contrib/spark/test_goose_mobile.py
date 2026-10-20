@@ -144,7 +144,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('thread-a', self.bridge.turns)
         self.assertNotIn('thread-a', self.bridge.clients[self.phone])
         self.assertEqual(sum(method == 'thread/list' and params['archived'] for method, params in calls), 2)
-        restarted = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token')
+        restarted = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token', push_config=Path(self.temp.name) / 'unconfigured-push.json')
         self.addCleanup(restarted.journal.close)
         self.assertNotIn('thread-a', restarted.metadata['sessions'])
 
@@ -278,7 +278,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
     async def test_projectless_chats_use_separate_folders_in_configured_codex_root(self):
         root = Path(self.temp.name).resolve() / 'Codex'
         token = Path(self.temp.name) / 'token'
-        bridge = Bridge(Path(self.temp.name) / 'new-state', token, token, projectless_root=root)
+        bridge = Bridge(Path(self.temp.name) / 'new-state', token, token, projectless_root=root, push_config=Path(self.temp.name) / 'unconfigured-push.json')
         self.addCleanup(bridge.journal.close)
         bridge.clients[self.phone] = set()
         calls = []
@@ -353,7 +353,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         token = root / 'token'; token.write_text('test-only-token')
-        self.bridge = Bridge(root / 'state', token, token)
+        self.bridge = Bridge(root / 'state', token, token, push_config=root / 'unconfigured-push.json')
         self.addCleanup(self.bridge.journal.close)
         self.bridge.rpc.epoch = 'test'
         self.bridge.rpc.ws = Socket()
@@ -471,7 +471,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
     async def test_crash_after_dispatch_preserves_message_and_never_retransmits(self):
         self.bridge.journal.prepare('uncertain', 'thread-a', 'append a record')
         self.bridge.journal.phase('uncertain', 'dispatching')
-        restored = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token')
+        restored = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token', push_config=Path(self.temp.name) / 'unconfigured-push.json')
         self.addCleanup(restored.journal.close); restored.clients[self.phone] = {'thread-a'}
         with self.assertRaisesRegex(RPCError, 'will not be sent or executed again'):
             await restored.start_prompt(self.phone, 'thread-a', 'append a record', 'uncertain')
@@ -486,7 +486,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.rpc.request = create
         result = await self.bridge.dispatch(self.phone, 'session/new', {'cwd': self.temp.name})
         identity = result['sessionId']
-        restored = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token')
+        restored = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token', push_config=Path(self.temp.name) / 'unconfigured-push.json')
         self.addCleanup(restored.journal.close); restored.clients[self.phone] = {identity}
         async def loaded(thread, include_turns=False):
             return {'cwd': self.temp.name, 'status': {'type': 'idle'}}
