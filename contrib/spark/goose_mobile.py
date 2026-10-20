@@ -14,6 +14,7 @@ import uuid
 
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
+from mobile_state import MobileState, merge_items
 
 
 class RPCError(Exception):
@@ -30,7 +31,7 @@ def run_status(turn):
     items = turn.get('items', [])
     users = [i['id'] for i in items if i['type'] == 'userMessage']
     answers = [i['id'] for i in items if i['type'] == 'agentMessage' and i.get('text')]
-    return {'id': turn['id'], 'state': {'completed': 'finished', 'inProgress': 'running', 'interrupted': 'cancelled', 'failed': 'failed'}.get(turn['status'], 'interrupted'),
+    return {'id': turn['id'], 'state': {'completed': 'finished', 'inProgress': 'running', 'interrupted': 'cancelled', 'failed': 'failed', 'backendInterrupted': 'interrupted'}.get(turn['status'], 'interrupted'),
             'userMessageId': users[0] if users else None, 'finalMessageId': answers[-1] if answers else None}
 
 
@@ -42,6 +43,9 @@ def item_update(item, completed=True):
                 'messageId': identity, 'content': {'type': 'text', 'text': text}}
     if kind in ('commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch'):
         title = item.get('command') or item.get('tool') or ('Edit ' + ', '.join(c.get('path', '') for c in item.get('changes', [])) if kind == 'fileChange' else kind)
+        if item.get('_mobileUncertain'):
+            return {'sessionUpdate': 'tool_call_update', 'toolCallId': identity, 'title': 'Outcome unconfirmed: ' + title, 'status': 'failed'}
+        completed = completed and item.get('status') != 'inProgress'
         return {'sessionUpdate': 'tool_call_update' if completed else 'tool_call', 'toolCallId': identity,
                 'title': title, 'status': ('failed' if item.get('status') in ('failed', 'declined') else 'completed') if completed else 'in_progress'}
     return None
@@ -54,6 +58,7 @@ class CodexRPC:
         self.pending = {}
         self.number = 0
         self.ready = asyncio.Event()
+        self.epoch = str(uuid.uuid4())
 
     async def request(self, method, params):
         await asyncio.wait_for(self.ready.wait(), 15)
@@ -93,9 +98,11 @@ class CodexRPC:
                 try:
                     token = self.bridge.upstream_token.read_text().strip()
                     async with session.ws_connect(self.bridge.upstream_url, headers={'Authorization': 'Bearer ' + token}, max_msg_size=32 * 1024 * 1024) as self.ws:
+                        self.epoch = str(uuid.uuid4())
                         reader = asyncio.create_task(self.read())
                         await self.call('initialize', {'clientInfo': {'name': 'goose_mobile_codex', 'title': 'Goose mobile on ai-research', 'version': '1.0.0'}, 'capabilities': {'experimentalApi': True}})
                         await self.ws.send_json({'method': 'initialized'})
+                        await self.bridge.reconcile()
                         self.ready.set()
                         logging.info('Connected to Codex app-server')
                         await reader
@@ -114,8 +121,9 @@ class CodexRPC:
                     self.bridge.permissions.clear()
                     for identity, future in list(self.bridge.waiters.items()):
                         if not future.done():
-                            future.set_result('interrupted')
+                            future.set_exception(RPCError('Backend connection interrupted. Saved progress will be restored; the request will not be resent.', -32010))
                     self.bridge.waiters.clear()
+                    await asyncio.gather(*(ws.close(code=1012, message=b'Backend reconnecting; do not resend') for ws in list(self.bridge.clients)), return_exceptions=True)
                     if reader:
                         reader.cancel()
                         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -129,6 +137,7 @@ class Bridge:
         self.state.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.state / 'metadata.json'
         self.metadata = json.loads(self.metadata_path.read_text()) if self.metadata_path.exists() else {'sessions': {}, 'projects': []}
+        self.journal = MobileState(self.state / 'recovery.sqlite3')
         self.token = Path(token).read_text().strip()
         self.upstream_token = Path(upstream_token)
         self.upstream_url = upstream_url
@@ -137,6 +146,7 @@ class Bridge:
         self.loading = set()
         self.loaded = set()
         self.turns = {}
+        self.inflight = {}
         self.waiters = {}
         self.permissions = {}
         self.tasks = set()
@@ -144,6 +154,121 @@ class Bridge:
         self.stream_locks = {}
         self.root = self.state / 'chats'
         self.root.mkdir(exist_ok=True)
+
+    def status(self, turn):
+        status = run_status(turn)
+        if turn['status'] == 'backendInterrupted':
+            record = next((r for r in self.journal.turns() if r['id'] == turn['id']), None)
+            tools = [i for i in turn.get('items', []) if item_update(i) and i['type'] not in ('userMessage', 'agentMessage')]
+            status['recovery'] = {'runId': turn['id'], 'canResume': bool(record and not record['reviewed']), 'readOnlyReview': True,
+                                  'completedTools': sum(i.get('status') == 'completed' for i in tools),
+                                  'uncertainTools': max(1, sum(bool(i.get('_mobileUncertain')) for i in tools))}
+        return status
+
+    def saved_history(self, identity, thread):
+        turns = {t['id']: t for t in thread.get('turns', [])}
+        for record in self.journal.turns(identity):
+            saved = record['snapshot']
+            turns[saved['id']] = saved
+        return list(turns.values())
+
+    async def reconcile(self):
+        # Reattach and observe. No prompt, approval decision, or tool is retransmitted.
+        identities = {r['thread'] for r in self.journal.turns() if r['snapshot']['status'] == 'inProgress'}
+        identities.update(r['thread'] for r in self.journal.db.execute("SELECT thread FROM submissions WHERE phase IN ('prepared','dispatching')"))
+        for identity in identities:
+            try:
+                result = await self.rpc.call('thread/resume', {'threadId': identity})
+                thread = result['thread']; self.loaded.add(identity)
+            except RPCError as error:
+                if not any(word in str(error).lower() for word in ('not found', 'no rollout', 'no session', 'does not exist', 'not materialized', 'not loaded')):
+                    raise
+                thread = {'turns': [], 'status': {'type': 'notLoaded'}}
+            native = {t['id']: t for t in thread.get('turns', [])}
+            active = thread.get('status', {}).get('type') == 'active'
+            for submission in self.journal.for_thread(identity):
+                matched = False
+                for turn in native.values():
+                    if any(i.get('clientId') == submission['id'] for i in turn.get('items', []) if i['type'] == 'userMessage'):
+                        self.journal.phase(submission['id'], 'finished' if turn['status'] in ('completed', 'failed') else 'accepted', turn['id'])
+                        matched = True
+                if not matched and submission['phase'] in ('prepared', 'dispatching') and not submission['turn'] and not active:
+                    checkpoint = {'id': submission['id'], 'status': 'backendInterrupted', 'items': [{'id': submission['id'], 'type': 'userMessage', 'content': [{'type': 'text', 'text': submission['text']}]}]}
+                    self.journal.save_turn(identity, checkpoint)
+                    self.journal.phase(submission['id'], 'unconfirmed')
+            for record in self.journal.turns(identity):
+                saved = record['snapshot']
+                if saved['status'] != 'inProgress':
+                    continue
+                current = native.get(saved['id'])
+                if active:
+                    current = current or saved
+                    # The durable stream may contain output not yet flushed into native history.
+                    current['items'] = merge_items(current.get('items', []), saved.get('items', [])); current['status'] = 'inProgress'
+                elif current and current['status'] == 'completed':
+                    current['items'] = merge_items(current.get('items', []), saved.get('items', []))
+                else:
+                    current = saved
+                    current['status'] = 'interrupted' if record['stopped'] else 'backendInterrupted'
+                    for item in current.get('items', []):
+                        if item.get('status') == 'inProgress':
+                            item['_mobileUncertain'] = True
+                self.turns[identity] = current
+                self.journal.save_turn(identity, current)
+                if record['stopped'] and active:
+                    await self.rpc.call('turn/interrupt', {'threadId': identity, 'turnId': current['id']})
+
+    async def acknowledge(self, identity, request):
+        if request:
+            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'acceptedRequestId': request}}})
+
+    async def start_prompt(self, ws, identity, text, request, review=False):
+        async with self.locks.setdefault(identity, asyncio.Lock()):
+            try:
+                submission, fresh = self.journal.prepare(request, identity, text)
+            except ValueError as error:
+                raise RPCError(str(error)) from error
+            self.clients[ws].add(identity)
+            if not fresh and submission['phase'] != 'prepared':
+                await self.acknowledge(identity, request if submission['phase'] in ('accepted', 'finished') else None)
+                if identity in self.waiters and self.inflight.get(identity) == request:
+                    future = self.waiters[identity]
+                elif submission['phase'] == 'finished':
+                    turn = next((r['snapshot'] for r in self.journal.turns(identity) if r['id'] == submission['turn']), None)
+                    if turn and turn['status'] == 'backendInterrupted':
+                        raise RPCError('This message was already submitted. Load its saved progress; it will not be sent or executed again.', -32011)
+                    return {'stopReason': 'end_turn' if turn and turn['status'] == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
+                elif submission['phase'] == 'accepted' and self.turns.get(identity, {}).get('status') == 'inProgress':
+                    future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
+                    self.inflight[identity] = request
+                else:
+                    raise RPCError('This message was already submitted. Load its saved progress; it will not be sent or executed again.', -32011)
+            else:
+                thread = await self.ensure_loaded(identity)
+                active = self.turns.get(identity)
+                if identity in self.waiters or (active and active['status'] == 'inProgress') or thread.get('status', {}).get('type') == 'active':
+                    raise RPCError('This conversation already has a running task. Reconnect to follow it.', -32000)
+                future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
+                self.inflight[identity] = request
+                self.journal.phase(request, 'dispatching')
+                args = {'threadId': identity, 'clientUserMessageId': request, 'input': [{'type': 'text', 'text': text}]}
+                if review:
+                    args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly'}})
+                else:
+                    args.update({'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': [thread['cwd']], 'networkAccess': False, 'excludeTmpdirEnvVar': False, 'excludeSlashTmp': False}})
+                try:
+                    response = await self.rpc.request('turn/start', args)
+                    turn = response['turn']
+                    if self.journal.submission(request)['phase'] != 'finished':
+                        self.journal.phase(request, 'accepted', turn['id'])
+                    await self.acknowledge(identity, request)
+                except Exception:
+                    self.waiters.pop(identity, None); self.inflight.pop(identity, None)
+                    raise
+        status = await asyncio.shield(future)
+        if status == 'failed':
+            raise RPCError('The Codex turn failed. Saved history is available; check the host log.', -32000)
+        return {'stopReason': 'end_turn' if status == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
 
     def save(self):
         temporary = self.metadata_path.with_suffix('.tmp')
@@ -171,6 +296,9 @@ class Bridge:
         identity = packet.get('params', {}).get('threadId')
         if identity and 'id' not in packet:
             async with self.stream_locks.setdefault(identity, asyncio.Lock()):
+                turn = self.journal.record_event(identity, packet)
+                if turn:
+                    self.turns[identity] = turn
                 await self.apply_event(packet)
         else:
             await self.apply_event(packet)
@@ -180,7 +308,7 @@ class Bridge:
         identity = params.get('threadId')
         if 'id' in packet:
             if method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/tool/requestUserInput'):
-                key = 'codex-' + str(packet['id'])
+                key = 'codex-' + self.rpc.epoch + '-' + str(packet['id'])
                 self.permissions[key] = {'packet': packet, 'obsolete': False}
                 await self.deliver_permission(key)
             else:
@@ -189,26 +317,20 @@ class Bridge:
         if not identity:
             return
         if method == 'turn/started':
-            self.turns[identity] = params['turn']
-            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': run_status(params['turn'])}}})
+            request = self.inflight.get(identity)
+            if request:
+                self.journal.phase(request, 'accepted', params['turn']['id'])
+            await self.acknowledge(identity, request)
+            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': self.status(params['turn'])}}})
         elif method == 'item/agentMessage/delta':
-            turn = self.turns.get(identity)
-            if turn:
-                item = next((i for i in turn['items'] if i['id'] == params['itemId']), None)
-                if item is None:
-                    item = {'id': params['itemId'], 'type': 'agentMessage', 'text': ''}
-                    turn['items'].append(item)
-                item['text'] += params['delta']
             await self.update(identity, {'sessionUpdate': 'agent_message_chunk', 'messageId': params['itemId'], 'content': {'type': 'text', 'text': params['delta']}})
         elif method in ('item/started', 'item/completed'):
             item = params['item']
-            turn = self.turns.get(identity)
-            if turn:
-                previous = next((i for i in turn['items'] if i['id'] == item['id']), None)
-                if previous is None:
-                    turn['items'].append(dict(item))
-                else:
-                    previous.update(item)
+            if item['type'] == 'userMessage' and item.get('clientId'):
+                request = self.journal.submission(item['clientId'])
+                if request:
+                    self.journal.phase(request['id'], 'accepted', params.get('turnId'))
+                    await self.acknowledge(identity, request['id'])
             if item['type'] == 'agentMessage':
                 return  # Text arrives as deltas; history replay uses authoritative completed items.
             if item['type'] == 'userMessage' and method == 'item/completed':
@@ -217,18 +339,27 @@ class Bridge:
             if update:
                 await self.update(identity, update)
         elif method == 'turn/completed':
-            turn = params['turn']
-            cached = self.turns.get(identity)
-            if not turn.get('items') and cached and cached['id'] == turn['id']:
-                turn['items'] = cached['items']
-            self.turns[identity] = turn
-            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': run_status(turn)}}})
+            turn = self.turns[identity]
+            record = next((r for r in self.journal.turns(identity) if r['id'] == turn['id']), None)
+            if turn['status'] == 'interrupted' and not (record and record['stopped']):
+                turn['status'] = 'backendInterrupted'
+                for item in turn.get('items', []):
+                    if item.get('status') == 'inProgress': item['_mobileUncertain'] = True
+                self.journal.save_turn(identity, turn)
+            for request in self.journal.for_thread(identity):
+                if request['turn'] == turn['id'] and turn['status'] != 'backendInterrupted':
+                    self.journal.phase(request['id'], 'finished', turn['id'])
+            self.inflight.pop(identity, None)
+            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': self.status(turn)}}})
             for key, pending in list(self.permissions.items()):
                 if pending['packet'].get('params', {}).get('turnId') == turn['id']:
                     self.permissions.pop(key)
             future = self.waiters.pop(identity, None)
             if future and not future.done():
-                future.set_result(turn['status'])
+                if turn['status'] == 'backendInterrupted':
+                    future.set_exception(RPCError('Backend work was interrupted. Saved progress is available for read-only review; the request will not be repeated.', -32010))
+                else:
+                    future.set_result(turn['status'])
         elif method == 'thread/name/updated':
             await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': params.get('threadName') or params.get('name') or 'New chat'})
 
@@ -287,7 +418,7 @@ class Bridge:
             await asyncio.wait_for(self.rpc.ready.wait(), 15)
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
-                                          '_meta': {'goose': {'hostOwnedRuns': True, 'workspaces': True, 'customNotifications': True}}}}
+                                          '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
             if action == 'add':
@@ -328,7 +459,7 @@ class Bridge:
             response = await self.rpc.request('thread/start', {'cwd': str(cwd), 'approvalPolicy': 'on-request', 'sandbox': 'workspace-write', 'historyMode': 'legacy'})
             thread = response['thread']; identity = thread['id']
             self.loaded.add(identity); self.clients[ws].add(identity)
-            self.metadata['sessions'][identity] = {'workspace': workspace}
+            self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd)}
             if workspace['kind'] == 'project' and str(cwd) not in self.metadata['projects']:
                 self.metadata['projects'].append(str(cwd))
             self.save()
@@ -339,7 +470,7 @@ class Bridge:
                 thread = await self.ensure_loaded(identity, include_turns=True)
                 async with self.stream_locks.setdefault(identity, asyncio.Lock()):
                     self.clients[ws].add(identity)
-                    turns = thread.get('turns', [])
+                    turns = self.saved_history(identity, thread)
                     active = self.turns.get(identity)
                     if active and active['status'] == 'inProgress':
                         turns = [t for t in turns if t['id'] != active['id']] + [active]
@@ -353,7 +484,8 @@ class Bridge:
                     for key, pending in list(self.permissions.items()):
                         if pending['packet']['params']['threadId'] == identity:
                             await self.deliver_permission(key, only=ws)
-                    return {'_meta': {'hostRuns': [run_status(t) for t in turns], 'workspace': self.session(thread)['_meta']['workspace']}}
+                    return {'_meta': {'hostRuns': [self.status(t) for t in turns], 'workspace': self.session(thread)['_meta']['workspace'],
+                                      'goose': {'acceptedRequests': [r['id'] for r in self.journal.for_thread(identity) if r['phase'] in ('accepted', 'finished')]}}}
             finally:
                 self.loading.discard((ws, identity))
         if method == 'session/prompt':
@@ -362,24 +494,32 @@ class Bridge:
             text = '\n'.join(c['text'] for c in params.get('prompt', []))
             if not text.strip():
                 raise RPCError('Enter a message.')
-            async with self.locks.setdefault(identity, asyncio.Lock()):
-                thread = await self.ensure_loaded(identity)
-                active = self.turns.get(identity)
-                if identity in self.waiters or (active and active['status'] == 'inProgress') or thread.get('status', {}).get('type') == 'active':
-                    raise RPCError('This conversation already has a running task. Reconnect to follow it.', -32000)
-                self.clients[ws].add(identity)
-                future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
-                try:
-                    await self.rpc.request('turn/start', {'threadId': identity, 'input': [{'type': 'text', 'text': text}]})
-                except Exception:
-                    self.waiters.pop(identity, None); raise
-            status = await future
-            if status == 'failed':
-                raise RPCError('The Codex turn failed. Saved history is available; check the host log.', -32000)
-            return {'stopReason': 'end_turn' if status == 'completed' else 'cancelled'}
+            request = params.get('_meta', {}).get('goose', {}).get('requestId') or str(uuid.uuid4())
+            if not isinstance(request, str) or len(request) > 128:
+                raise RPCError('Invalid submission ID.')
+            return await self.start_prompt(ws, identity, text, request)
+        if method == '_goose/unstable/session/submission':
+            record = self.journal.submission(params['requestId'])
+            if record and record['thread'] != identity:
+                raise RPCError('Submission belongs to another conversation.')
+            return {'state': record['phase'] if record else 'unknown'}
+        if method == '_goose/unstable/session/resume_run':
+            record = next((r for r in self.journal.turns(identity) if r['id'] == params['runId']), None)
+            if not record or record['snapshot']['status'] != 'backendInterrupted':
+                raise RPCError('This interrupted checkpoint is no longer available.')
+            saved = record['snapshot']
+            checkpoint = json.dumps(saved, ensure_ascii=False)
+            goal = next((r['text'] for r in self.journal.for_thread(identity) if r['turn'] == saved['id'] or r['id'] == saved['id']), '')
+            text = ('Review this interrupted task using read-only inspection. Do not repeat any previous command, apply patches, change files, restart services, or perform network mutations. '
+                    'Report which actions are confirmed complete and which outcomes remain uncertain. Check actual file/service state where possible. '
+                    'Then explain the next step and wait for the user to give a new instruction. This is a recovery review, not permission to re-execute work.\n'
+                    + 'Original task: ' + goal + '\nSaved checkpoint: ' + checkpoint)
+            self.journal.reviewed(saved['id'])
+            return await self.start_prompt(ws, identity, text, 'review-' + saved['id'], review=True)
         if method == 'session/cancel':
             turn = self.turns.get(identity)
             if turn and turn['status'] == 'inProgress':
+                self.journal.stopped(turn['id'])
                 await self.rpc.request('turn/interrupt', {'threadId': identity, 'turnId': turn['id']})
             return {}
         if method == '_goose/unstable/session/rename':
@@ -393,6 +533,10 @@ class Bridge:
             self.loaded.discard(identity)
             if action == 'delete':
                 self.metadata['sessions'].pop(identity, None)
+                with self.journal.db:
+                    self.journal.db.execute('DELETE FROM turns WHERE thread=?', (identity,))
+                    self.journal.db.execute('DELETE FROM submissions WHERE thread=?', (identity,))
+                    self.journal.db.execute('DELETE FROM events WHERE thread=?', (identity,))
             elif action == 'archive':
                 self.metadata['sessions'].setdefault(identity, {})['archivedAt'] = iso()
             else:
@@ -443,6 +587,9 @@ def app(bridge):
     application = web.Application()
     application.router.add_get('/acp', bridge.websocket)
     application.router.add_get('/status', bridge.health)
+    async def shutdown(application):
+        await asyncio.gather(*(ws.close(code=1012, message=b'Adapter restarting; saved work continues') for ws in list(bridge.clients)), return_exceptions=True)
+    application.on_shutdown.append(shutdown)
     async def lifecycle(application):
         upstream = asyncio.create_task(bridge.rpc.maintain())
         yield
