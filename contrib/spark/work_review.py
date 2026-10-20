@@ -17,12 +17,15 @@ MAX_BASELINE = 8 * 1024 * 1024
 
 def visible_text(text, limit=MAX_DIFF):
     # Strip terminal control sequences and common credential forms before transport.
-    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)', '', text)
-    text = re.sub(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', '[REDACTED PRIVATE KEY]', text, flags=re.S)
+    input_truncated = len(text) > MAX_REVIEW
+    text = text[:MAX_REVIEW]
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+    text = re.sub(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)', '[REDACTED PRIVATE KEY]', text, flags=re.S)
+    text = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text)
     text = re.sub(r'(?i)(authorization\s*[:=]\s*(?:bearer\s+)?|(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*[\"\x27]?)[^\s\"\x27,;]+', r'\1[REDACTED]', text)
     text = re.sub(r'(?i)(https?://)[^\s/@:]+:[^\s/@]+@', r'\1[REDACTED]@', text)
     encoded = text.encode('utf-8', errors='replace')
-    return encoded[:limit].decode('utf-8', errors='ignore'), len(encoded) > limit
+    return encoded[:limit].decode('utf-8', errors='ignore'), input_truncated or len(encoded) > limit
 
 
 class Tree:

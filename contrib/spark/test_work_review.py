@@ -134,6 +134,10 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('FAILED', result['output'])
         replay = merge_items([item], [{'id': 'tool', 'type': 'commandExecution', 'status': 'completed'}])[0]
         self.assertEqual(replay['aggregatedOutput'], item['aggregatedOutput'])
+        private, truncated = visible_text('-----BEGIN PRIVATE KEY-----\n' + 'private' * 40000)
+        self.assertIn('[REDACTED PRIVATE KEY]', private)
+        self.assertNotIn('privateprivate', private)
+        self.assertTrue(truncated)
 
 
 class ReviewStreamingTests(unittest.IsolatedAsyncioTestCase):
