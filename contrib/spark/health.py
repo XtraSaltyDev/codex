@@ -13,7 +13,7 @@ import time
 import tomllib
 
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
-from aiohttp import ClientSession, ClientTimeout, WSMsgType
+from aiohttp import ClientSession, ClientTimeout, ClientWSTimeout, WSMsgType
 
 
 def check(identity, title, status, detail):
@@ -35,7 +35,7 @@ class RPC:
 
     async def __aenter__(self):
         headers = {'X-Secret-Key': self.token} if self.mobile else {'Authorization': 'Bearer ' + self.token}
-        self.ws = await self.session.ws_connect(self.url, headers=headers, max_msg_size=16 * 1024 * 1024)
+        self.ws = await self.session.ws_connect(self.url, headers=headers, timeout=ClientWSTimeout(ws_close=1), max_msg_size=16 * 1024 * 1024)
         params = {'protocolVersion': 1, 'clientCapabilities': {}} if self.mobile else {
             'clientInfo': {'name': 'codex_spark_doctor', 'version': '1.0.0'}}
         try:
