@@ -427,7 +427,7 @@ class Bridge:
                     if item.get('status') == 'inProgress': item['_mobileUncertain'] = True
                 self.journal.save_turn(identity, turn)
             await self.complete_review(turn, interrupted=turn['status'] != 'completed')
-            self.push.finish(identity, turn)
+            self.push.finish(identity, {**turn, 'status': params['turn']['status']})
             for request in self.journal.for_thread(identity):
                 if request['turn'] == turn['id'] and turn['status'] != 'backendInterrupted':
                     self.journal.phase(request['id'], 'finished', turn['id'])

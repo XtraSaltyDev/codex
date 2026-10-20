@@ -131,6 +131,10 @@ class PushNotifications:
 
     def finish(self, thread, turn):
         self.cancel_input(thread, turn['id'])
+        if turn['status'] == 'interrupted':
+            with self.db:
+                self.db.execute('DELETE FROM push_runs WHERE turn=?', (turn['id'],))
+            return
         kind = {'completed': 'completed', 'failed': 'failed', 'backendInterrupted': 'failed'}.get(turn['status'])
         if kind:
             self.enqueue(thread, turn['id'], kind)

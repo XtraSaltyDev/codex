@@ -20,6 +20,13 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_cancellation_does_not_generate_a_failure_notification(self):
+        await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': {'id': 'cancelled', 'status': 'inProgress', 'items': []}}})
+        await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': 'cancelled', 'status': 'interrupted', 'items': []}}})
+        self.bridge.push.reconcile(self.bridge.journal.turns())
+        self.assertEqual(self.bridge.journal.db.execute('SELECT count(*) FROM push_events').fetchone()[0], 0)
+        self.assertEqual(self.bridge.turns['thread-a']['status'], 'backendInterrupted')
+
     async def test_notifications_observe_completion_failure_and_input_without_executing_work(self):
         with patch.object(self.bridge.push, 'config', return_value={'environment': 'sandbox', 'topic': 'computer.goose.mobile.dev'}):
             await self.bridge.dispatch(self.phone, '_goose/unstable/notifications/register', {
