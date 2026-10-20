@@ -249,6 +249,7 @@ class Bridge:
             self.clients[ws].add(identity)
             if not fresh and submission['phase'] != 'prepared':
                 await self.acknowledge(identity, request if submission['phase'] in ('accepted', 'finished') else None)
+                submission = self.journal.submission(request)
                 if identity in self.waiters and self.inflight.get(identity) == request:
                     future = self.waiters[identity]
                 elif submission['phase'] == 'finished':

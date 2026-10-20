@@ -159,6 +159,19 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RPCError):
             await self.bridge.start_prompt(self.phone, 'thread-a', 'different action', 'request-a')
 
+    async def test_completion_during_duplicate_receipt_returns_saved_result_without_dispatch(self):
+        self.bridge.journal.prepare('request-a', 'thread-a', 'write once')
+        self.bridge.journal.phase('request-a', 'accepted', 'turn-a')
+        turn = {'id': 'turn-a', 'status': 'completed', 'items': []}
+        self.bridge.journal.save_turn('thread-a', turn)
+        async def acknowledge(identity, request):
+            self.bridge.journal.phase(request, 'finished', 'turn-a')
+            self.bridge.turns[identity] = turn
+        self.bridge.acknowledge = acknowledge
+        result = await self.bridge.start_prompt(self.phone, 'thread-a', 'write once', 'request-a')
+        self.assertEqual(result['stopReason'], 'end_turn')
+        self.assertEqual(self.bridge.rpc.ws.packets, [])
+
     async def test_crash_after_dispatch_preserves_message_and_never_retransmits(self):
         self.bridge.journal.prepare('uncertain', 'thread-a', 'append a record')
         self.bridge.journal.phase('uncertain', 'dispatching')
