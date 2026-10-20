@@ -650,4 +650,5 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     home = Path.home()
     bridge = Bridge(home / '.local/state/codex-spark/mobile', home / '.config/codex-spark/mobile.token', home / '.config/codex-spark/server.token')
+    bridge.health_probe.mobile_url = f'ws://127.0.0.1:{args.port}/acp'
     web.run_app(app(bridge), host='127.0.0.1', port=args.port, access_log=None)

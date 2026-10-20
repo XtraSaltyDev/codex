@@ -50,13 +50,18 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         self.model_requests = 0
         self.model_ids = ['test-model']
         self.reject_auth = False
+        self.reject_mobile_auth = False
+        self.model_status = 200
+        self.mobile_methods = []
         app = web.Application()
         app.router.add_get('/v1/models', self.models)
         app.router.add_get('/native', self.native)
+        app.router.add_get('/mobile', self.mobile)
         self.server = TestServer(app)
         await self.server.start_server()
         self.addAsyncCleanup(self.server.close)
-        self.health = SparkHealth(home=self.home, upstream_url=str(self.server.make_url('/native')).replace('http:', 'ws:'))
+        self.health = SparkHealth(home=self.home, upstream_url=str(self.server.make_url('/native')).replace('http:', 'ws:'),
+                                  mobile_url=str(self.server.make_url('/mobile')).replace('http:', 'ws:'))
         runtime = self.home / '.codex-spark'
         runtime.mkdir()
         (runtime / 'config.toml').write_text('model="test-model"\nmodel_provider="spark"\n[model_providers.spark]\nbase_url=' + json.dumps(str(self.server.make_url('/v1'))) + '\n')
@@ -64,7 +69,18 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
 
     async def models(self, request):
         self.model_requests += 1
-        return web.json_response({'data': [{'id': identity} for identity in self.model_ids]})
+        return web.json_response({'data': [{'id': identity} for identity in self.model_ids]}, status=self.model_status)
+
+    async def mobile(self, request):
+        if self.reject_mobile_auth or request.headers.get('X-Secret-Key') != 'private-mobile-token':
+            raise web.HTTPUnauthorized()
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        async for frame in ws:
+            packet = json.loads(frame.data)
+            self.mobile_methods.append(packet['method'])
+            await ws.send_json({'id': packet['id'], 'result': {'protocolVersion': 1}})
+        return ws
 
     async def native(self, request):
         if self.reject_auth or request.headers.get('Authorization') != 'Bearer private-server-token':
@@ -84,6 +100,7 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         result = await self.health.collect()
         self.assertEqual(result['status'], 'ok')
         self.assertEqual(self.methods, ['initialize', 'initialized', 'config/read'])
+        self.assertEqual(self.mobile_methods, ['initialize'])
         self.assertEqual(self.model_requests, 1)
         self.assertNotIn('private-server-token', json.dumps(result))
         self.assertNotIn('inference-secret', json.dumps(result))
@@ -103,6 +120,24 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         checks = {item['id']: item for item in result['checks']}
         self.assertEqual(checks['app_server']['status'], 'error')
         self.assertEqual(checks['spark']['status'], 'ok')
+
+    async def test_mobile_secret_failure_does_not_report_a_healthy_backend(self):
+        self.reject_mobile_auth = True
+        result = await self.health.collect()
+        checks = {item['id']: item for item in result['checks']}
+        self.assertEqual(result['status'], 'degraded')
+        self.assertEqual(checks['app_server']['status'], 'ok')
+        self.assertEqual(checks['mobile_connection']['status'], 'error')
+        self.assertNotIn('private-mobile-token', json.dumps(result))
+
+    async def test_unavailable_model_server_is_distinct_from_working_clients(self):
+        self.model_status = 503
+        result = await self.health.collect()
+        checks = {item['id']: item for item in result['checks']}
+        self.assertEqual(checks['app_server']['status'], 'ok')
+        self.assertEqual(checks['mobile_connection']['status'], 'ok')
+        self.assertEqual(checks['spark']['status'], 'error')
+        self.assertIn('model server and private tunnel', checks['spark']['detail'])
 
     async def test_private_storage_and_journal_integrity_are_required(self):
         database = self.health.state / 'recovery.sqlite3'

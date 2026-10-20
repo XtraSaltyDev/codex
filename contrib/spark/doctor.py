@@ -71,7 +71,7 @@ def verify_command(home, identity, marker, streamed_tools):
 
 async def diagnose(args):
     home = Path.home()
-    health = SparkHealth(home=home)
+    health = SparkHealth(home=home, mobile_url=args.mobile_url)
     result = await health.collect(fresh=True)
     if args.live:
         if result['status'] == 'ok':
@@ -95,7 +95,7 @@ def main():
     parser.add_argument('--json', action='store_true', help='Print a machine-readable report')
     parser.add_argument('--live', action='store_true', help='Run one model/tool task in a new diagnostic chat, reconnect, verify, and archive it')
     parser.add_argument('--timeout', type=int, default=90, help='Total live-test deadline in seconds (10–180; default 90)')
-    parser.add_argument('--mobile-url', default='ws://127.0.0.1:3285/acp', help='Private mobile WebSocket endpoint used by --live')
+    parser.add_argument('--mobile-url', default='ws://127.0.0.1:3285/acp', help='Private mobile WebSocket endpoint to check and use for --live')
     args = parser.parse_args()
     if not 10 <= args.timeout <= 180:
         parser.error('--timeout must be between 10 and 180 seconds')

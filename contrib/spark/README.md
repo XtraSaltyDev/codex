@@ -59,7 +59,7 @@ codex-spark doctor --live
 codex-spark doctor --live --mobile-url ws://10.66.66.1:3284/acp
 ```
 
-`doctor` checks the three user services, authenticates to the app-server, queries the
+`doctor` checks the three user services, authenticates to the app-server and mobile adapter, queries the
 effective provider's model catalog, and checks journal integrity, private permissions,
 write access and free disk space. Routine checks do not start turns or run inference.
 `--live` adds one read-only terminal marker command in a new diagnostic chat, checks

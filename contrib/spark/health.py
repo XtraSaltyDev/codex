@@ -39,7 +39,9 @@ class RPC:
         params = {'protocolVersion': 1, 'clientCapabilities': {}} if self.mobile else {
             'clientInfo': {'name': 'codex_spark_doctor', 'version': '1.0.0'}}
         try:
-            await self.call('initialize', params)
+            initialized = await self.call('initialize', params)
+            if self.mobile and initialized.get('protocolVersion') != 1:
+                raise ValueError('Unsupported mobile protocol')
             if not self.mobile:
                 await self.ws.send_json({'method': 'initialized'})
         except BaseException:
@@ -71,11 +73,12 @@ class RPC:
 
 
 class SparkHealth:
-    def __init__(self, home=None, state=None, upstream_url=None):
+    def __init__(self, home=None, state=None, upstream_url=None, mobile_url='ws://127.0.0.1:3285/acp'):
         self.home = Path(home or Path.home())
         self.state = Path(state or self.home / '.local/state/codex-spark/mobile')
         self.runtime = self.home / '.codex-spark'
         self.upstream_url = upstream_url
+        self.mobile_url = mobile_url
         self.lock = asyncio.Lock()
         self.cached = None
         self.cached_at = 0
@@ -91,11 +94,12 @@ class SparkHealth:
             except (OSError, ValueError):
                 config = {}
                 checks.append(check('configuration', 'Configuration', 'error', 'Spark profile is missing or invalid'))
-            services, native, storage = await asyncio.gather(self.services(), self.native(), asyncio.to_thread(self.storage))
+            services, native, storage, mobile = await asyncio.gather(self.services(), self.native(), asyncio.to_thread(self.storage), self.mobile())
             checks.extend(services)
             checks.append(native[0])
             # Inspect the effective running provider when Codex can answer.
             checks.append(await self.model(native[1] or config))
+            checks.append(mobile)
             checks.append(storage)
             self.cached, self.cached_at = report(checks), time.monotonic()
             return self.cached
@@ -156,6 +160,19 @@ class SparkHealth:
             return check('spark', 'Spark model', 'ok', 'Configured model is available; inference has not been tested')
         except Exception:
             return check('spark', 'Spark model', 'error', 'Spark is unavailable; check the model server and private tunnel')
+
+    async def mobile(self):
+        try:
+            token = (self.home / '.config/codex-spark/mobile.token').read_text().strip()
+            if not token:
+                raise ValueError('Empty mobile token')
+            async with asyncio.timeout(5):
+                async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+                    async with RPC(session, self.mobile_url, token, mobile=True):
+                        pass
+            return check('mobile_connection', 'Mobile connection', 'ok', 'Mobile credentials accepted and the adapter answered')
+        except Exception:
+            return check('mobile_connection', 'Mobile connection', 'error', 'Mobile endpoint is unavailable or its secret was rejected')
 
     def storage(self):
         try:
