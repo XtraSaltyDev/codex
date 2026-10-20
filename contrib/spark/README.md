@@ -2,7 +2,9 @@
 
 This branch keeps the upstream Rust agent intact and adds a small deployment layer for a Linux development host with a separate model server.
 
-The runtime uses a custom Responses provider, a model catalog matched to the served model, a private loopback app-server with bearer authentication, and separate Codex state. Credentials, machine addresses, inference keys, and generated configuration stay outside this repository.
+The runtime uses a custom Responses provider, a model catalog matched to the served model, a private loopback app-server with bearer authentication, and separate Codex state. Credentials, inference keys, and generated configuration stay outside this repository.
+
+For the existing Goose iPhone app, see [Goose mobile with Codex Spark](GOOSE_MOBILE.md). Its ACP adapter runs on Linux beside the app-server and uses the existing private WireGuard endpoint.
 
 ## Build
 
