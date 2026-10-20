@@ -100,8 +100,8 @@ interruption is marked partial, and never repeats a prompt, tool action or file 
 
 The adapter advertises `healthStatus: true`. Goose polls the authenticated `/status`
 endpoint while foregrounded and shows the same service, authenticated Codex, model
-availability and saved-work checks as `codex-spark doctor`. Tap the library health row
-or open Backend details to see individual results and refresh them. HTTP 503 retains
+availability and saved-work checks as `codex-spark doctor`. Open Settings → Backend
+to see individual results and refresh them. HTTP 503 retains
 the structured failure report; missing/wrong mobile credentials return 401. Status
 responses contain no inference URLs or credentials, use `Cache-Control: no-store`,
 and are briefly cached on the host to coalesce simultaneous readers. The ACP method
@@ -173,6 +173,46 @@ Adapter metadata lives in `~/.local/state/codex-spark/mobile/metadata.json`; nat
 Codex transcripts remain in `~/.codex-spark`. Logs are in
 `journalctl --user -u codex-spark-mobile.service`. For source updates, restart only
 this user service, after allowing active work to finish.
+
+## Background task notifications
+
+Goose can register this iPhone for completed-task, failed-task, and input/approval
+alerts in Settings → Notifications. Notification taps authenticate to the saved host,
+resolve the exact stored event and chat, and load its history. They never send a
+prompt, resume a tool, or answer an approval. A tap during a VPN outage waits for
+reconnection; notifications from another host cannot redirect the connection.
+
+The app needs an explicit push-enabled App ID and provisioning profile. The current
+Debug build uses the sandbox APNs environment and `computer.goose.mobile.dev` topic.
+Install the matching topic-restricted Apple key privately on ai-research:
+
+```sh
+python3 contrib/spark/configure_push.py --key-file /private/path/AuthKey_KEYID.p8 \
+  --key-id KEYID --team-id TEAMID --topic computer.goose.mobile.dev --environment sandbox
+```
+
+Use the real 10-character IDs. `push.json` and its private key stay in
+`~/.config/codex-spark/`, mode 0600, outside Git. Existing pairing and network routing
+are used unchanged. Only the host makes outbound HTTPS/HTTP2 requests to Apple;
+there is no public inbound push endpoint. Production builds need a matching
+production profile, APNs configuration and key.
+
+Generic alert text includes no prompt, command, answer, filename or chat title.
+Only opaque host/chat/event identifiers accompany the alert. SQLite stores device
+registrations and delivery state; completed deliveries are deduplicated across
+reconnects and adapter restarts. Transient transport failures retry with bounded
+backoff and stable APNs collapse IDs. Apple acceptance does not guarantee display
+or exactly-once notification delivery; task dispatch and tool replay are unaffected.
+Expired device tokens are disabled; token rotation and iOS permission changes are
+reconciled on foreground connection. Explicit task cancellation does not generate
+a failure alert. Answered, finished, deleted or obsolete connection-scoped input
+requests are not sent from the queue.
+
+Send test notification offers all three alert types for the latest chat and this
+device only, delayed ten seconds so Goose can be closed. Tests are visibly labeled
+and never run a model or tool. Validate actual APNs acceptance separately from a
+physical iPhone displaying the alert and opening the correct saved chat, including
+a cold launch. Input remains subject to the current request after opening.
 
 ## Rollback
 

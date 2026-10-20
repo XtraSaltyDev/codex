@@ -18,6 +18,7 @@ from aiohttp import ClientSession, WSMsgType, web
 from mobile_state import MobileState, merge_items
 from health import SparkHealth
 from work_review import capture as capture_review, finish as finish_review, visible_text
+from push_notifications import PushNotifications
 
 
 class RPCError(Exception):
@@ -166,6 +167,7 @@ class CodexRPC:
                             future.set_exception(RPCError('Codex connection ended. Reconnect to load saved history.', -32000))
                     for pending in list(self.bridge.permissions.values()):
                         pending['obsolete'] = True
+                        self.bridge.push.cancel_input(pending['packet']['params']['threadId'], pending['packet']['params'].get('turnId'))
                     self.bridge.permissions.clear()
                     for identity, future in list(self.bridge.waiters.items()):
                         if not future.done():
@@ -180,12 +182,17 @@ class CodexRPC:
 
 
 class Bridge:
-    def __init__(self, state, token, upstream_token, upstream_url='ws://127.0.0.1:4500', projectless_root=None):
+    def __init__(self, state, token, upstream_token, upstream_url='ws://127.0.0.1:4500', projectless_root=None, push_config=None):
         self.state = Path(state)
         self.state.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.state / 'metadata.json'
         self.metadata = json.loads(self.metadata_path.read_text()) if self.metadata_path.exists() else {'sessions': {}, 'projects': []}
         self.journal = MobileState(self.state / 'recovery.sqlite3')
+        if 'notificationHostId' not in self.metadata:
+            self.metadata['notificationHostId'] = str(uuid.uuid4())
+            self.save()
+        self.push = PushNotifications(self.journal.db, self.metadata['notificationHostId'],
+                                      push_config or Path.home() / '.config/codex-spark/push.json')
         self.token = Path(token).read_text().strip()
         self.upstream_token = Path(upstream_token)
         self.upstream_url = upstream_url
@@ -274,6 +281,9 @@ class Bridge:
                     await self.complete_review(current, interrupted=True)
                 if record['stopped'] and active:
                     await self.rpc.call('turn/interrupt', {'threadId': identity, 'turnId': current['id']})
+                if current['status'] == 'inProgress':
+                    self.push.watch(identity, current['id'])
+        self.push.reconcile(self.journal.turns())
 
     async def acknowledge(self, identity, request):
         if request:
@@ -378,6 +388,7 @@ class Bridge:
             if method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/tool/requestUserInput'):
                 key = 'codex-' + self.rpc.epoch + '-' + str(packet['id'])
                 self.permissions[key] = {'packet': packet, 'obsolete': False}
+                self.push.enqueue(identity, params.get('turnId', params.get('itemId', key)), 'input', request=key)
                 await self.deliver_permission(key)
             else:
                 await self.rpc.ws.send_json({'id': packet['id'], 'error': {'code': -32601, 'message': 'This mobile adapter does not support ' + method}})
@@ -385,6 +396,7 @@ class Bridge:
         if not identity:
             return
         if method == 'turn/started':
+            self.push.watch(identity, params['turn']['id'])
             request = self.inflight.get(identity)
             if request:
                 self.journal.phase(request, 'accepted', params['turn']['id'])
@@ -415,6 +427,7 @@ class Bridge:
                     if item.get('status') == 'inProgress': item['_mobileUncertain'] = True
                 self.journal.save_turn(identity, turn)
             await self.complete_review(turn, interrupted=turn['status'] != 'completed')
+            self.push.finish(identity, turn)
             for request in self.journal.for_thread(identity):
                 if request['turn'] == turn['id'] and turn['status'] != 'backendInterrupted':
                     self.journal.phase(request['id'], 'finished', turn['id'])
@@ -460,6 +473,7 @@ class Bridge:
             outcome = response.get('outcome', {})
             result = {'decision': 'accept' if outcome.get('outcome') == 'selected' and outcome.get('optionId') == 'accept' else 'decline'}
         self.permissions.pop(packet['id'], None)
+        self.push.cancel_input(params['threadId'], params.get('turnId'))
         await self.rpc.ws.send_json({'id': original['id'], 'result': result})
 
     def session(self, thread, archived=False):
@@ -563,7 +577,32 @@ class Bridge:
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
                                                               'workspaceAssignment': False, 'newChatWorkspaces': True, 'workspaceBrowsing': True, 'workspaceCreation': True,
                                                               'draftSessionValidation': True,
-                                                              'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
+                                                              'backend': self.backend, 'healthStatus': True, 'customNotifications': True,
+                                                              'pushNotifications': self.push.descriptor()}}}}
+        if method == '_goose/unstable/notifications/register':
+            try:
+                return self.push.register(params)
+            except ValueError as error:
+                raise RPCError(str(error)) from error
+        if method == '_goose/unstable/notifications/status':
+            return self.push.status()
+        if method == '_goose/unstable/notifications/resolve':
+            event = self.journal.db.execute('SELECT thread FROM push_events WHERE id=?', (params.get('eventId'),)).fetchone()
+            if params.get('hostId') != self.push.host_id or not event or event['thread'] != identity:
+                raise RPCError('This notification does not belong to a saved chat on this host.')
+            thread = await self.ensure_loaded(identity)
+            return {'session': self.session(thread)}
+        if method == '_goose/unstable/notifications/test':
+            if not self.push.config():
+                raise RPCError('Task notifications are not configured on this host.')
+            if params.get('kind', 'completed') not in ('completed', 'failed', 'input'):
+                raise RPCError('Unknown test notification type.')
+            installation = params.get('installationId')
+            if not isinstance(installation, str) or not self.journal.db.execute('SELECT 1 FROM push_devices WHERE installation=? AND enabled=1', (installation,)).fetchone():
+                raise RPCError('Enable task notifications on this device first.')
+            await self.ensure_loaded(identity)
+            event = self.push.enqueue(identity, str(uuid.uuid4()), params.get('kind', 'completed'), test=True, installation=installation)
+            return {'eventId': event, 'test': True}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
             if action in ('browse', 'createFolder'):
@@ -692,6 +731,7 @@ class Bridge:
                 await self.confirm_deleted_thread(identity, error)
             self.loaded.discard(identity)
             if action == 'delete':
+                self.push.forget(identity)
                 self.metadata['sessions'].pop(identity, None)
                 self.turns.pop(identity, None)
                 for subscriptions in self.clients.values():
@@ -757,10 +797,14 @@ def app(bridge):
     application.on_shutdown.append(shutdown)
     async def lifecycle(application):
         upstream = asyncio.create_task(bridge.rpc.maintain())
+        notifications = asyncio.create_task(bridge.push.run())
         yield
         upstream.cancel()
+        notifications.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await upstream
+        with contextlib.suppress(asyncio.CancelledError):
+            await notifications
         for task in list(bridge.tasks):
             task.cancel()
         await asyncio.gather(*bridge.tasks, return_exceptions=True)

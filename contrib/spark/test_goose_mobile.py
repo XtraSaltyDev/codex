@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from goose_mobile import Bridge, RPCError, item_update, run_status
@@ -19,6 +20,40 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notifications_observe_completion_failure_and_input_without_executing_work(self):
+        with patch.object(self.bridge.push, 'config', return_value={'environment': 'sandbox', 'topic': 'computer.goose.mobile.dev'}):
+            await self.bridge.dispatch(self.phone, '_goose/unstable/notifications/register', {
+                'hostId': self.bridge.push.host_id, 'installationId': str(uuid.uuid4()), 'enabled': True, 'deviceToken': 'ab' * 32})
+        for status in ('completed', 'failed'):
+            turn = 'notification-' + status
+            await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': {'id': turn, 'status': 'inProgress', 'items': []}}})
+            await self.bridge.event({'id': 77, 'method': 'item/tool/requestUserInput', 'params': {
+                'threadId': 'thread-a', 'turnId': turn, 'itemId': 'input-' + turn,
+                'questions': [{'id': 'question', 'header': 'Question', 'question': 'Private question must not appear in APNs'}]}})
+            await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': turn, 'status': status, 'items': []}}})
+            await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': turn, 'status': status, 'items': []}}})
+        rows = self.bridge.journal.db.execute('SELECT e.kind,d.state,e.payload FROM push_events e JOIN push_deliveries d ON e.id=d.event ORDER BY e.rowid').fetchall()
+        self.assertEqual([(r['kind'], r['state']) for r in rows], [('input', 'obsolete'), ('completed', 'pending'), ('input', 'obsolete'), ('failed', 'pending')])
+        self.assertTrue(all('Private question' not in row['payload'] for row in rows))
+        self.assertEqual(self.bridge.rpc.ws.packets, [])
+
+    async def test_notification_resolution_checks_host_and_event_and_only_reads_the_saved_chat(self):
+        event = self.bridge.push.enqueue('thread-a', 'turn-a', 'completed')
+        calls = []
+        async def request(method, params):
+            calls.append(method)
+            self.assertEqual(method, 'thread/resume')
+            return {'thread': {'id': 'thread-a', 'cwd': '/tmp/project', 'updatedAt': 1, 'name': 'Right chat'}}
+        self.bridge.rpc.request = request
+        args = {'hostId': self.bridge.push.host_id, 'sessionId': 'thread-a', 'eventId': event}
+        for bad in ({'hostId': 'another-host'}, {'sessionId': 'another-chat'}, {'eventId': 'unknown-event'}):
+            with self.assertRaises(RPCError):
+                await self.bridge.dispatch(self.phone, '_goose/unstable/notifications/resolve', {**args, **bad})
+        self.assertEqual(calls, [])
+        result = await self.bridge.dispatch(self.phone, '_goose/unstable/notifications/resolve', args)
+        self.assertEqual(result['session']['title'], 'Right chat')
+        self.assertEqual(calls, ['thread/resume'])
+
     async def test_draft_states_distinguish_loaded_indexed_archived_and_missing_chats(self):
         self.seed_deletion_state()
         async def request(method, params):
