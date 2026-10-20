@@ -19,6 +19,63 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_folder_browser_lists_only_directories_and_resolves_navigation(self):
+        root = Path(self.temp.name).resolve()
+        (root / 'Zulu').mkdir()
+        (root / 'alpha folder').mkdir()
+        (root / '.hidden').mkdir()
+        (root / 'file.txt').write_text('not a folder')
+        (root / 'alias').symlink_to(root / 'alpha folder', target_is_directory=True)
+        listed = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root)})
+        self.assertEqual([p['name'] for p in listed['directories']], ['alias', 'alpha folder', 'state', 'Zulu'])
+        self.assertEqual(listed['parent'], str(root.parent))
+        self.assertEqual(listed['home'], str(Path.home().resolve()))
+        opened = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root / 'alias')})
+        self.assertEqual(opened['path'], str(root / 'alpha folder'))
+        hidden = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root), 'showHidden': True})
+        self.assertIn('.hidden', [p['name'] for p in hidden['directories']])
+        self.assertEqual(self.bridge.metadata['projects'], [])
+
+    async def test_remote_folder_browser_home_root_pages_and_errors(self):
+        root = Path(self.temp.name).resolve()
+        for index in range(205):
+            (root / f'folder-{index:03}').mkdir()
+        first = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root)})
+        second = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root), 'offset': first['nextOffset']})
+        self.assertEqual(len(first['directories']), 200)
+        self.assertEqual(len(second['directories']), 6)
+        self.assertIsNone(second['nextOffset'])
+        with patch('goose_mobile.Path.home', return_value=root):
+            home = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse'})
+        self.assertEqual(home['path'], str(root))
+        filesystem_root = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': '/'})
+        self.assertIsNone(filesystem_root['parent'])
+        for path in ('relative', str(root / 'missing'), str(root / 'token')):
+            with self.assertRaises(RPCError):
+                await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': path})
+        with patch('goose_mobile.os.scandir', side_effect=PermissionError('Permission denied')):
+            with self.assertRaisesRegex(RPCError, 'Permission denied'):
+                await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'browse', 'path': str(root)})
+
+    async def test_remote_folder_creation_is_explicit_and_cannot_escape_or_overwrite(self):
+        root = Path(self.temp.name).resolve()
+        async def create(name):
+            return await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'createFolder', 'path': str(root), 'name': name})
+        for name in ('', ' ', '.', '..', '../escape', '/absolute', 'nested/folder', ' padded ', 'null\x00name', None):
+            with self.assertRaises(RPCError):
+                await create(name)
+        created = await create('New folder 🌱')
+        self.assertEqual(created['path'], str(root / 'New folder 🌱'))
+        self.assertTrue(Path(created['path']).is_dir())
+        sentinel = Path(created['path']) / 'keep.txt'
+        sentinel.write_text('preserved')
+        with self.assertRaisesRegex(RPCError, 'already exists'):
+            await create('New folder 🌱')
+        with self.assertRaisesRegex(RPCError, 'already exists'):
+            await create('token')
+        self.assertEqual(sentinel.read_text(), 'preserved')
+        self.assertEqual(self.bridge.metadata['projects'], [])
+
     async def test_projectless_chats_use_separate_folders_in_configured_codex_root(self):
         root = Path(self.temp.name).resolve() / 'Codex'
         token = Path(self.temp.name) / 'token'
@@ -70,6 +127,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta['backend']['defaultAccess'], 'full')
         self.assertEqual(meta['backend']['providerName'], 'DGX Spark')
         self.assertFalse(meta['workspaceAssignment'])
+        self.assertTrue(meta['workspaceBrowsing'])
+        self.assertTrue(meta['workspaceCreation'])
         self.assertNotIn('private-key', str(result))
         self.assertNotIn('api_key', str(result))
 

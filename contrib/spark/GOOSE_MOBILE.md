@@ -45,6 +45,16 @@ stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
 
+The authenticated workspaces RPC advertises `workspaceBrowsing` and `workspaceCreation`.
+`browse` lists host directories (200 per page), with canonical current path, parent,
+home, and optional hidden entries. `createFolder` creates one child of the selected
+directory with a validated name and exclusive mkdir; existing targets are never
+overwritten. Creation is explicit and is not automatically retried after a lost reply.
+Browsing never creates a Codex thread or invokes the model. Only choosing a folder
+adds it to saved projects. Goose's checkmark selects the current directory; cancelling
+leaves the compose workspace and draft intact. These operations use the Linux user's
+filesystem permissions and the existing private mobile authentication.
+
 Completed mobile runs include an inline changed-files summary, per-file added/removed
 line counts and saved unified diffs. Tap a file to inspect its captured diff. The
 baseline is the working tree at task start, including pre-existing dirty/untracked

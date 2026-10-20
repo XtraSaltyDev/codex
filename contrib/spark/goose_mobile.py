@@ -30,6 +30,45 @@ def iso(timestamp=None):
     return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).isoformat() if timestamp else dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def browse_folders(params):
+    try:
+        requested = params.get('path') or str(Path.home())
+        if not isinstance(requested, str) or not Path(requested).expanduser().is_absolute():
+            raise RPCError('Choose an absolute folder path on the connected host.')
+        path = Path(requested).expanduser().resolve(strict=True)
+        if not path.is_dir():
+            raise RPCError('Choose an existing folder on the connected host.')
+        offset = params.get('offset', 0)
+        if type(offset) is not int or offset < 0:
+            raise RPCError('Invalid folder page.')
+        if params.get('action') == 'createFolder':
+            name = params.get('name', '')
+            if not isinstance(name, str) or not name.strip() or name != name.strip() or name in ('.', '..') or '/' in name or '\x00' in name:
+                raise RPCError('Enter a folder name without slashes or leading or trailing spaces.')
+            path = path / name
+            path.mkdir(mode=0o700)
+            offset = 0
+        children = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.name.startswith('.') and params.get('showHidden') is not True:
+                    continue
+                try:
+                    if entry.is_dir():
+                        children.append({'name': entry.name, 'path': str(path / entry.name)})
+                except OSError:
+                    continue
+        children.sort(key=lambda entry: (entry['name'].casefold(), entry['name']))
+        end = offset + 200
+        return {'path': str(path), 'parent': str(path.parent) if path.parent != path else None,
+                'home': str(Path.home().resolve()), 'directories': children[offset:end],
+                'nextOffset': end if end < len(children) else None}
+    except FileExistsError:
+        raise RPCError('A file or folder with that name already exists. Choose another name or open the existing folder.')
+    except (OSError, ValueError, RuntimeError) as error:
+        raise RPCError(f'Cannot open or create this folder: {error}') from error
+
+
 def run_status(turn):
     items = turn.get('items', [])
     users = [i['id'] for i in items if i['type'] == 'userMessage']
@@ -474,9 +513,12 @@ class Bridge:
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
-                                                              'workspaceAssignment': False, 'newChatWorkspaces': True, 'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
+                                                              'workspaceAssignment': False, 'newChatWorkspaces': True, 'workspaceBrowsing': True, 'workspaceCreation': True,
+                                                              'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
+            if action in ('browse', 'createFolder'):
+                return await asyncio.to_thread(browse_folders, params)
             if action == 'add':
                 path = str(Path(params['path']).expanduser().resolve(strict=True))
                 if not Path(path).is_dir():
