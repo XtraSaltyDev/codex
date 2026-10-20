@@ -45,6 +45,18 @@ stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
 
+Goose validates saved draft references before merging them into Recents. The authenticated
+`_goose/unstable/session/draft_states` method checks loaded chats and every page of the
+active and archived native index, across providers and source kinds. The capability is
+`draftSessionValidation`; older hosts retain their existing behavior. Only a complete
+successful check can mark a reference missing. VPN interruptions, errors and incomplete
+replies preserve the last confirmed state and all unsent text.
+
+Missing or unverified references are available under **Saved drafts**, outside Recents
+and search. Their state survives cold launches. **Use in new chat** moves the text to the
+local composer without creating a backend chat or sending a prompt. An existing new-chat
+draft is never overwritten. Copy and explicit local deletion are also available.
+
 Deleting an already-missing backend chat also clears its stale phone draft. A missing-rollout
 error is accepted only after confirming the ID is neither loaded nor indexed in any page
 of active or archived chats, across all source kinds and providers. Indexed work, transport

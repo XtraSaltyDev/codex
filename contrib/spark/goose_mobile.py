@@ -505,6 +505,11 @@ class Bridge:
         if identity in (await self.rpc.request('thread/loaded/list', {}))['data']:
             raise error
         # A missing rollout alone does not establish that indexed or archived work is gone.
+        async for _, thread in self.indexed_threads():
+            if thread['id'] == identity:
+                raise error
+
+    async def indexed_threads(self):
         for archived in (False, True):
             cursor = None
             seen = set()
@@ -515,14 +520,30 @@ class Bridge:
                 if cursor:
                     args['cursor'] = cursor
                 page = await self.rpc.request('thread/list', args)
-                if any(thread['id'] == identity for thread in page['data']):
-                    raise error
+                for thread in page['data']:
+                    yield archived, thread
                 cursor = page.get('nextCursor')
                 if not cursor:
                     break
                 if cursor in seen:
-                    raise RPCError('Could not verify that this chat was deleted. Reconnect and try again.', -32000)
+                    raise RPCError('Could not verify saved chat state. Reconnect and try again.', -32000)
                 seen.add(cursor)
+
+    async def draft_session_states(self, identities):
+        if not isinstance(identities, list) or len(identities) > 100 or any(not isinstance(identity, str) or not identity or len(identity) > 128 for identity in identities):
+            raise RPCError('Provide up to 100 saved chat IDs.')
+        identities = list(dict.fromkeys(identities))
+        if not identities:
+            return {'sessions': []}
+        loaded = set((await self.rpc.request('thread/loaded/list', {}))['data'])
+        states = {identity: {'sessionId': identity, 'state': 'available' if identity in loaded else 'missing'} for identity in identities}
+        async for archived, thread in self.indexed_threads():
+            if thread['id'] in states:
+                session = self.session(thread, archived)
+                if not archived:
+                    session['_meta'].pop('archivedAt', None)
+                states[thread['id']] = {'sessionId': thread['id'], 'state': 'archived' if archived else 'available', 'session': session}
+        return {'sessions': list(states.values())}
 
     async def dispatch(self, ws, method, params):
         identity = params.get('sessionId')
@@ -541,6 +562,7 @@ class Bridge:
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
                                                               'workspaceAssignment': False, 'newChatWorkspaces': True, 'workspaceBrowsing': True, 'workspaceCreation': True,
+                                                              'draftSessionValidation': True,
                                                               'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
@@ -558,6 +580,8 @@ class Bridge:
             if action == 'add':
                 result['addedProject'] = {'path': path, 'name': Path(path).name}
             return result
+        if method == '_goose/unstable/session/draft_states':
+            return await self.draft_session_states(params.get('sessionIds'))
         if method == 'session/list':
             query = params.get('_meta', {}).get('query', '')
             cursor = json.loads(params['cursor']) if params.get('cursor') else {'archived': False, 'cursor': None, 'query': query}

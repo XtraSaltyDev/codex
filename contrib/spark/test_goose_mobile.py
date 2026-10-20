@@ -19,6 +19,48 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_draft_states_distinguish_loaded_indexed_archived_and_missing_chats(self):
+        self.seed_deletion_state()
+        async def request(method, params):
+            if method == 'thread/loaded/list':
+                return {'data': ['loaded']}
+            self.assertTrue(params['useStateDbOnly'])
+            self.assertEqual(params['modelProviders'], [])
+            self.assertIn('subAgent', params['sourceKinds'])
+            if params['archived']:
+                return {'data': [{'id': 'archived', 'cwd': '/tmp/archive', 'updatedAt': 1}]}
+            if not params.get('cursor'):
+                return {'data': [], 'nextCursor': 'later-page'}
+            return {'data': [{'id': 'indexed', 'cwd': '/tmp/indexed', 'updatedAt': 2}]}
+        self.bridge.rpc.request = request
+        result = await self.bridge.dispatch(self.phone, '_goose/unstable/session/draft_states', {'sessionIds': ['thread-a', 'loaded', 'indexed', 'archived']})
+        states = {entry['sessionId']: entry for entry in result['sessions']}
+        self.assertEqual({key: value['state'] for key, value in states.items()}, {'thread-a': 'missing', 'loaded': 'available', 'indexed': 'available', 'archived': 'archived'})
+        self.assertIn('archivedAt', states['archived']['session']['_meta'])
+        self.assert_deletion_state(False)
+
+    async def test_draft_state_failure_never_returns_partial_missing_results(self):
+        self.seed_deletion_state()
+        async def request(method, params):
+            if method == 'thread/loaded/list':
+                return {'data': []}
+            if params['archived']:
+                raise RPCError('Backend connection interrupted', -32000)
+            return {'data': []}
+        self.bridge.rpc.request = request
+        with self.assertRaisesRegex(RPCError, 'connection interrupted'):
+            await self.bridge.dispatch(self.phone, '_goose/unstable/session/draft_states', {'sessionIds': ['thread-a']})
+        self.assert_deletion_state(False)
+
+    async def test_draft_state_requests_are_bounded_and_empty_request_needs_no_backend(self):
+        async def request(method, params):
+            self.fail('Invalid or empty requests must not query the backend')
+        self.bridge.rpc.request = request
+        for identities in (None, 'one-id', [''], [None], ['x' * 129], ['id'] * 101):
+            with self.assertRaises(RPCError):
+                await self.bridge.draft_session_states(identities)
+        self.assertEqual(await self.bridge.draft_session_states([]), {'sessions': []})
+
     def seed_deletion_state(self):
         for identity in ('thread-a', 'keep'):
             self.bridge.metadata['sessions'][identity] = {'cwd': '/tmp/' + identity}
@@ -244,6 +286,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(meta['workspaceAssignment'])
         self.assertTrue(meta['workspaceBrowsing'])
         self.assertTrue(meta['workspaceCreation'])
+        self.assertTrue(meta['draftSessionValidation'])
         self.assertNotIn('private-key', str(result))
         self.assertNotIn('api_key', str(result))
 
