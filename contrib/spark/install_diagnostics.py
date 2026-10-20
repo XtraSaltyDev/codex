@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import sys
 import subprocess
+from spark_release import VERSION
 
 
 def install():
@@ -17,7 +18,11 @@ def install():
         subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--target', str(dependencies), '-r', str(source / 'requirements-mobile.txt')], check=True)
     target = home / '.local/share/codex-spark/diagnostics'
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name in ('health.py', 'doctor.py'):
+    version_file = target / 'VERSION.new'
+    version_file.write_text(VERSION + '\n')
+    version_file.chmod(0o600)
+    version_file.replace(target / 'VERSION')
+    for name in ('health.py', 'doctor.py', 'spark_release.py'):
         temporary = target / (name + '.new')
         temporary.write_bytes((source / name).read_bytes())
         temporary.chmod(0o600)

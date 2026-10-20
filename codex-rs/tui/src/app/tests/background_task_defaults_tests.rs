@@ -590,7 +590,7 @@ async fn command_center_new_read_failure_keeps_overview_and_does_not_start() -> 
             .find(|message| {
                 message.contains("Failed to")
                     || message.contains("Unable to check folder trust")
-                    || message.contains("Codex's background server is shutting down")
+                    || message.contains("Codex Spark's background server is shutting down")
             })
             .expect("visible read error");
         if capability == HistoryCapabilities::ConfigReadFails {

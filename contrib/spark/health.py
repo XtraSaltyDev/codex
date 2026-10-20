@@ -11,6 +11,7 @@ import stat
 import sys
 import time
 import tomllib
+from spark_release import VERSION
 
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, ClientTimeout, ClientWSTimeout, WSMsgType
@@ -37,7 +38,7 @@ class RPC:
         headers = {'X-Secret-Key': self.token} if self.mobile else {'Authorization': 'Bearer ' + self.token}
         self.ws = await self.session.ws_connect(self.url, headers=headers, timeout=ClientWSTimeout(ws_close=1), max_msg_size=16 * 1024 * 1024)
         params = {'protocolVersion': 1, 'clientCapabilities': {}} if self.mobile else {
-            'clientInfo': {'name': 'codex_spark_doctor', 'version': '1.0.0'}}
+            'clientInfo': {'name': 'codex_spark_doctor', 'version': VERSION}}
         try:
             initialized = await self.call('initialize', params)
             if self.mobile and initialized.get('protocolVersion') != 1:
@@ -121,7 +122,7 @@ class SparkHealth:
             except (OSError, TimeoutError):
                 return check('service_' + unit.removeprefix('codex-spark-'), title, 'error', 'Cannot inspect ' + title.lower())
         return await asyncio.gather(*(probe('codex-spark-' + name, title) for name, title in (
-            ('tunnel', 'Spark tunnel'), ('app-server', 'Codex service'), ('mobile', 'Mobile service'))))
+            ('tunnel', 'Spark tunnel'), ('app-server', 'Codex Spark service'), ('mobile', 'Mobile service'))))
 
     async def native(self):
         try:
@@ -136,9 +137,9 @@ class SparkHealth:
                 async with ClientSession(timeout=ClientTimeout(total=5)) as session:
                     async with RPC(session, url, token) as rpc:
                         config = (await rpc.call('config/read', {'includeLayers': False}))['config']
-            return check('app_server', 'Codex connection', 'ok', 'Codex authenticated and answered'), config
+            return check('app_server', 'Codex Spark connection', 'ok', 'Codex Spark authenticated and answered'), config
         except Exception:
-            return check('app_server', 'Codex connection', 'error', 'Codex is unavailable or its server token was rejected'), None
+            return check('app_server', 'Codex Spark connection', 'error', 'Codex Spark is unavailable or its server token was rejected'), None
 
     async def model(self, config):
         try:

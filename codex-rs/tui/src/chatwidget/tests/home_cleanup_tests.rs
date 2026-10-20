@@ -1,4 +1,4 @@
-//! Verifies that widget fixtures own and clean up their isolated Codex homes.
+//! Verifies that widget fixtures own and clean up their isolated Codex Spark homes.
 
 use super::*;
 use pretty_assertions::assert_eq;

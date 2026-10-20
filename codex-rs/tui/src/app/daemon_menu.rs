@@ -55,7 +55,7 @@ impl App {
                 "Manage this server on its host. Local daemon updates are unavailable for remote connections.",
             )
         } else if self.daemon_cli_executable.is_none() {
-            Some("Run the Codex CLI to manage the daemon from this menu.")
+            Some("Run the Codex Spark to manage the daemon from this menu.")
         } else {
             None
         };
@@ -108,7 +108,7 @@ impl App {
                 .as_ref()
                 .filter(|connection| connection.is_local_daemon && !connection.is_managed_daemon)
                 .map(|_| {
-                    "Codex hasn't verified it manages this server. Restart it where it was started."
+                    "Codex Spark hasn't verified it manages this server. Restart it where it was started."
                         .to_string()
                 }),
             actions: vec![Box::new(|tx| tx.send(AppEvent::ConfirmDaemonRestart))],
@@ -136,7 +136,7 @@ impl App {
             header: Box::new(DaemonMenuHeader(vec![
                 Line::from("Restart background server?".bold()),
                 Line::from("Active or queued work in other chats may be interrupted."),
-                Line::from("Codex will reconnect automatically."),
+                Line::from("Codex Spark will reconnect automatically."),
             ])),
             items: vec![
                 SelectionItem {
@@ -173,7 +173,7 @@ impl App {
             }
         };
         explanation.push_str("\nThis may restart the daemon and interrupt active or queued work.\nCodex exits to update in this terminal. Relaunch it afterward.");
-        let mut header = vec![Line::from("Update daemon and exit Codex?".bold())];
+        let mut header = vec![Line::from("Update daemon and exit Codex Spark?".bold())];
         header.extend(explanation.lines().map(|line| Line::from(line.to_owned())));
         self.chat_widget.show_selection_view(SelectionViewParams {
             header: Box::new(DaemonMenuHeader(header)),

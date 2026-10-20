@@ -35,7 +35,7 @@ pub(super) struct ExecServerCommand {
     #[command(subcommand)]
     pub(super) command: Option<ExecServerSubcommand>,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of Codex.
+    /// Error out when config.toml contains fields that are not recognized by this version of Codex Spark.
     #[arg(
         id = "exec_server_strict_config",
         long = "strict-config",
@@ -183,7 +183,7 @@ impl ExecServerCommand {
         let codex_self_exe = arg0_paths
             .codex_self_exe
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("Codex executable path is not configured"))?;
+            .ok_or_else(|| anyhow::anyhow!("Codex Spark executable path is not configured"))?;
         let mut runtime_paths = ExecServerRuntimeOptions::new(
             codex_self_exe,
             arg0_paths.codex_linux_sandbox_exe.clone(),

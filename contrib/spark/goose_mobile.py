@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expose a private Goose ACP endpoint backed by the running Codex app-server."""
+"""Expose a private Goose ACP endpoint backed by the running Codex Spark app-server."""
 
 import asyncio
 import contextlib
@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
 from mobile_state import MobileState, merge_items
 from health import SparkHealth
+from spark_release import VERSION
 from work_review import capture as capture_review, finish as finish_review, visible_text
 from push_notifications import PushNotifications
 
@@ -149,22 +150,22 @@ class CodexRPC:
                     async with session.ws_connect(self.bridge.upstream_url, headers={'Authorization': 'Bearer ' + token}, max_msg_size=32 * 1024 * 1024) as self.ws:
                         self.epoch = str(uuid.uuid4())
                         reader = asyncio.create_task(self.read())
-                        await self.call('initialize', {'clientInfo': {'name': 'goose_mobile_codex', 'title': 'Goose mobile on ai-research', 'version': '1.0.0'}, 'capabilities': {'experimentalApi': True}})
+                        await self.call('initialize', {'clientInfo': {'name': 'goose_mobile_codex', 'title': 'Goose mobile on ai-research', 'version': VERSION}, 'capabilities': {'experimentalApi': True}})
                         await self.ws.send_json({'method': 'initialized'})
                         await self.bridge.reconcile()
                         self.ready.set()
-                        logging.info('Connected to Codex app-server')
+                        logging.info('Connected to Codex Spark app-server')
                         await reader
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    logging.warning('Codex connection ended: %s', type(error).__name__)
+                    logging.warning('Codex Spark connection ended: %s', type(error).__name__)
                 finally:
                     self.ready.clear()
                     self.bridge.loaded.clear()
                     for future in list(self.pending.values()):
                         if not future.done():
-                            future.set_exception(RPCError('Codex connection ended. Reconnect to load saved history.', -32000))
+                            future.set_exception(RPCError('Codex Spark connection ended. Reconnect to load saved history.', -32000))
                     for pending in list(self.bridge.permissions.values()):
                         pending['obsolete'] = True
                         self.bridge.push.cancel_input(pending['packet']['params']['threadId'], pending['packet']['params'].get('turnId'))
@@ -339,7 +340,7 @@ class Bridge:
                     raise
         status = await asyncio.shield(future)
         if status == 'failed':
-            raise RPCError('The Codex turn failed. Saved history is available; check the host log.', -32000)
+            raise RPCError('The Codex Spark turn failed. Saved history is available; check the host log.', -32000)
         return {'stopReason': 'end_turn' if status == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
 
     def save(self):
@@ -450,7 +451,7 @@ class Bridge:
         params = packet['params']; identity = params['threadId']
         if packet['method'] == 'item/tool/requestUserInput':
             properties = {q['id']: {'type': 'string', 'title': q.get('header', q['id']), 'description': q['question']} for q in params['questions']}
-            message = {'id': key, 'method': 'elicitation/create', 'params': {'sessionId': identity, 'mode': 'form', 'message': 'Codex needs your input', 'requestedSchema': {'type': 'object', 'properties': properties, 'required': list(properties)}}}
+            message = {'id': key, 'method': 'elicitation/create', 'params': {'sessionId': identity, 'mode': 'form', 'message': 'Codex Spark needs your input', 'requestedSchema': {'type': 'object', 'properties': properties, 'required': list(properties)}}}
         else:
             message = {'id': key, 'method': 'session/request_permission', 'params': {'sessionId': identity,
                        'toolCall': {'toolCallId': params['itemId'], 'title': params.get('command') or params.get('reason') or 'Allow file change outside the workspace?', 'rawInput': params},
@@ -567,12 +568,12 @@ class Bridge:
             await asyncio.wait_for(self.rpc.ready.wait(), 15)
             config = (await self.rpc.request('config/read', {'includeLayers': False}))['config']
             provider = config.get('model_provider', '')
-            self.backend = {'kind': 'codex', 'name': 'Codex Spark', 'agentName': 'Codex',
+            self.backend = {'kind': 'codex', 'name': 'Codex Spark', 'agentName': 'Codex Spark',
                             'executionHost': socket.gethostname(), 'modelId': config.get('model'),
                             'providerName': config.get('model_providers', {}).get(provider, {}).get('name', provider),
                             'defaultAccess': {'danger-full-access': 'full', 'workspace-write': 'workspace', 'read-only': 'readOnly'}.get(config.get('sandbox_mode')),
                             'approvalPolicy': config.get('approval_policy')}
-            return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
+            return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': VERSION}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
                                                               'workspaceAssignment': False, 'newChatWorkspaces': True, 'workspaceBrowsing': True, 'workspaceCreation': True,
@@ -614,7 +615,7 @@ class Bridge:
                 if path not in self.metadata['projects']:
                     self.metadata['projects'].append(path); self.save()
             elif action == 'assign':
-                raise RPCError('Moving an existing Codex conversation to another folder is not supported. Start a new chat in that folder.')
+                raise RPCError('Moving an existing Codex Spark conversation to another folder is not supported. Start a new chat in that folder.')
             result = {'projectlessRoot': str(self.root), 'projects': [{'path': p, 'name': Path(p).name} for p in self.metadata['projects']]}
             if action == 'add':
                 result['addedProject'] = {'path': path, 'name': Path(path).name}

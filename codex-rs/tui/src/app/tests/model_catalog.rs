@@ -512,7 +512,7 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
 
     Our latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.
 
-    GPT-5.4 on Amazon Bedrock is no longer offered in Codex
+    GPT-5.4 on Amazon Bedrock is no longer offered in Codex Spark
 
     Codex now uses GPT-6 Sol on Amazon Bedrock in place of GPT-5.4 on Amazon Bedrock. Switch to GPT-6 Sol on Amazon Bedrock to continue.
     ");

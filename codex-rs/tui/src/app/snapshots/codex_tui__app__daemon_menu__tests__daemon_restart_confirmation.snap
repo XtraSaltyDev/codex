@@ -12,7 +12,7 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
 
       Restart background server?
       Active or queued work in other chats may be interrupted.
-      Codex will reconnect automatically.
+      Codex Spark will reconnect automatically.
 
 
     › 1. Cancel
@@ -25,4 +25,4 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
 
 
 
-  Service v0.153.0 < Codex CLI v0.154.0 · /daemon
+  Service v0.153.0 < Codex Spark v0.154.0 · /daemon

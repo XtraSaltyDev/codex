@@ -1,9 +1,8 @@
 ---
 source: tui/src/app/tests.rs
-assertion_line: 8342
 expression: transcript
 ---
-  /permissions - choose what Codex is allowed to do
+  /permissions - choose what Codex Spark is allowed to do
   /model - choose what model and reasoning effort to use
   /review - review any changes and find issues
 

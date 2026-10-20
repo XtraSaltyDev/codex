@@ -14,7 +14,7 @@ fn user_verification_errors_use_typed_reasons_without_raw_provider_diagnostics()
     };
     assert_eq!(
         verification_failure(&error).message,
-        "No user-verification credential is available in the local Codex binary."
+        "No user-verification credential is available in the local Codex Spark binary."
     );
     let malformed = TypedRequestError::Server {
         method: "userVerification/verify".to_string(),
@@ -28,7 +28,7 @@ fn user_verification_errors_use_typed_reasons_without_raw_provider_diagnostics()
     };
     assert_eq!(
         verification_failure(&malformed).message,
-        "The local Codex binary could not complete user verification."
+        "The local Codex Spark binary could not complete user verification."
     );
 }
 

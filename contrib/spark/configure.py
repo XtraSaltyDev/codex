@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import urllib.request
 
-from install_client import with_default_cwd
+from install_client import with_default_cwd, with_command_routing
 
 
 NETWORK_INSTRUCTIONS = (
@@ -31,7 +31,13 @@ def write(path, contents, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_text() != contents:
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        shutil.copy2(path, path.with_name(path.name + '.before-' + stamp))
+        if path.parent == Path.home() / '.local/bin':
+            backups = Path.home() / '.local/state/codex-spark/backups/launchers'
+            backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+            backup = backups / (path.name + '.' + stamp)
+        else:
+            backup = path.with_name(path.name + '.before-' + stamp)
+        shutil.copy2(path, backup)
     path.write_text(contents)
     path.chmod(mode)
 
@@ -108,6 +114,7 @@ model_auto_compact_token_limit = {min(200000, int(context * 0.80))}
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 web_search = "disabled"
+check_for_update_on_startup = false
 developer_instructions = {json.dumps(NETWORK_INSTRUCTIONS)}
 
 [sandbox_workspace_write]
@@ -154,12 +161,12 @@ enabled = false
     server = launchers / 'codex-spark-server'
     write(server, '#!/bin/sh\nexec ' + quote(str(raw)) + f' app-server --strict-config --listen ws://127.0.0.1:{args.port} --ws-auth capability-token --ws-token-file ' + quote(str(token)) + ' "$@"\n', 0o755)
     client = launchers / 'codex-spark'
-    write(client, with_default_cwd('#!/bin/sh\nset -eu\nCODEX_SPARK_REMOTE_TOKEN=$(cat ' + quote(str(token)) + ')\nexport CODEX_SPARK_REMOTE_TOKEN\nexec ' + quote(str(raw)) + f' --remote ws://127.0.0.1:{args.port} --remote-auth-token-env CODEX_SPARK_REMOTE_TOKEN "$@"\n'), 0o755)
+    write(client, with_command_routing(with_default_cwd('#!/bin/sh\nset -eu\nCODEX_SPARK_REMOTE_TOKEN=$(cat ' + quote(str(token)) + ')\nexport CODEX_SPARK_REMOTE_TOKEN\nexec ' + quote(str(raw)) + f' --remote ws://127.0.0.1:{args.port} --remote-auth-token-env CODEX_SPARK_REMOTE_TOKEN "$@"\n'), raw), 0o755)
     from install_diagnostics import install as install_diagnostics
     install_diagnostics()
     unit = home / '.config/systemd/user/codex-spark-app-server.service'
     write(unit, f'''[Unit]
-Description=Personal Codex fork app-server using DGX Spark inference
+Description=Codex Spark app-server using DGX Spark inference
 Wants=codex-spark-tunnel.service
 After=codex-spark-tunnel.service
 
@@ -179,7 +186,7 @@ WantedBy=default.target
     write(home / '.local/share/applications/codex-spark.desktop', f'''[Desktop Entry]
 Type=Application
 Name=Codex Spark
-Comment=Personal Codex fork using the DGX Spark model
+Comment=Codex Spark using the DGX Spark model
 Exec="{client}" --cd "{repo}"
 Path={repo}
 Terminal=true

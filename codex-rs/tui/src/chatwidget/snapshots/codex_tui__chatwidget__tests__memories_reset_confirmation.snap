@@ -4,7 +4,7 @@ expression: popup
 ---
   Reset all memories?
   This clears local memory files and rollout summaries for the current Codex
-  home.
+  Spark home.
 
 
 › Reset all memories  Delete local memory files and rollout summaries

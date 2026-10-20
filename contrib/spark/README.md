@@ -1,10 +1,18 @@
-# Personal Codex / Spark setup
+# Codex Spark
 
-This branch keeps the upstream Rust agent intact and adds a small deployment layer for a Linux development host with a separate model server.
+This personal fork adds Codex Spark branding and a deployment layer for a Linux development host with a separate model server.
 
 The runtime uses a custom Responses provider, a model catalog matched to the served model, a private loopback app-server with bearer authentication, and separate Codex state. Credentials, inference keys, and generated configuration stay outside this repository.
 
 For the existing Goose iPhone app, see [Goose mobile with Codex Spark](GOOSE_MOBILE.md). Its ACP adapter runs on Linux beside the app-server and uses the existing private WireGuard endpoint.
+
+## Version
+
+The first Codex Spark release is **0.1.0**. The Rust workspace version in
+`codex-rs/Cargo.toml` is the release version for the CLI, TUI, and app-server.
+`codex-spark --version`, `codex-spark doctor --version`, and the mobile handshake
+report the same version. Releases are maintained from this fork;
+upstream installer and update promotions are disabled. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Build
 
@@ -52,6 +60,8 @@ From a terminal, `codex-spark` starts new chats in the terminal's current workin
 directory, even though execution uses the persistent app-server. An explicit
 `--cd /path/to/project` or `-C /path/to/project` overrides that default. The
 application-menu shortcut opens the fork's project directory explicitly.
+Help, version, completions, and administrative commands such as `exec` and `mcp`
+go directly to the isolated CLI without requiring the app-server token.
 
 To update an existing terminal launcher without changing the model profile or
 restarting any services, run:
@@ -59,6 +69,29 @@ restarting any services, run:
 ```sh
 python3 contrib/spark/install_client.py
 ```
+
+Launcher backups are stored under `~/.local/state/codex-spark/backups/launchers/`.
+
+## Update an existing host
+
+After building the reviewed fork revision, wait for running tasks to finish and
+back up the installed binary and configuration under `~/.local/state/codex-spark/`.
+Replace only the runtime and helper files; the initial profile installer is for
+setting up a new host. From the repository root:
+
+```sh
+install -m 755 codex-rs/target/release/codex ~/.local/lib/codex-spark/codex.new
+strip --strip-debug ~/.local/lib/codex-spark/codex.new
+mv ~/.local/lib/codex-spark/codex.new ~/.local/lib/codex-spark/codex
+python3 contrib/spark/install_client.py
+python3 contrib/spark/install_diagnostics.py
+systemctl --user restart codex-spark-app-server.service codex-spark-mobile.service
+codex-spark --version
+codex-spark doctor --live
+```
+
+This preserves the existing provider, credentials, networking, and chat databases.
+The Spark tunnel and other host services continue running during the update.
 
 Reach the terminal client over SSH when using another computer. The model runs on Spark; shell commands and repository edits run on the Linux development host. Files on a Mac need a Mac runtime or an explicit copy/checkout on Linux.
 

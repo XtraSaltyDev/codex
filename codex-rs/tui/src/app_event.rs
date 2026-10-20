@@ -876,7 +876,7 @@ pub(crate) enum AppEvent {
         url: String,
     },
 
-    /// Open the current thread in Codex Desktop.
+    /// Open the current thread in Codex Spark Desktop.
     OpenDesktopThread {
         thread_id: ThreadId,
     },

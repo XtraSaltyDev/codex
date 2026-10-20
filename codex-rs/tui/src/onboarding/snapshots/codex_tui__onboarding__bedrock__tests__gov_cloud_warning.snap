@@ -2,9 +2,9 @@
 source: tui/src/onboarding/bedrock_tests.rs
 expression: render_visible(&state)
 ---
-Using Codex with AWS GovCloud
+Using Codex Spark with AWS GovCloud
 
-You are using Codex with AWS GovCloud. Please ensure you or your
+You are using Codex Spark with AWS GovCloud. Please ensure you or your
 administrator have read the application configuration and security
 guidance before proceeding.
 

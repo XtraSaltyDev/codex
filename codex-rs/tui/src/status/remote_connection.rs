@@ -57,7 +57,7 @@ pub(crate) fn server_version_notice(client: &str, server: Option<&str>) -> Optio
         ServerVersionNoticeKind::Different => "different from",
     };
     Some(format!(
-        "A background Codex service is running v{server}, {comparison} your Codex CLI v{client}."
+        "A background Codex Spark service is running v{server}, {comparison} your Codex Spark v{client}."
     ))
 }
 
@@ -236,17 +236,17 @@ mod tests {
     fn server_version_notice_uses_client_release_policy() {
         assert_eq!(
             server_version_notice("0.153.0", Some("0.152.1")),
-            Some("A background Codex service is running v0.152.1, older than your Codex CLI v0.153.0.".to_string())
+            Some("A background Codex Spark service is running v0.152.1, older than your Codex Spark v0.153.0.".to_string())
         );
         assert_eq!(server_version_notice("0.153.0", Some("0.153.0")), None);
         assert_eq!(
             server_version_notice("0.0.0", Some("0.152.1")),
-            Some("A background Codex service is running v0.152.1, different from your Codex CLI v0.0.0.".to_string())
+            Some("A background Codex Spark service is running v0.152.1, different from your Codex Spark v0.0.0.".to_string())
         );
         assert_eq!(server_version_notice("0.153.0", /*server*/ None), None);
         assert_eq!(
             server_version_notice("0.153.0-alpha.10", Some("0.153.0-alpha.9")),
-            Some("A background Codex service is running v0.153.0-alpha.9, older than your Codex CLI v0.153.0-alpha.10.".to_string())
+            Some("A background Codex Spark service is running v0.153.0-alpha.9, older than your Codex Spark v0.153.0-alpha.10.".to_string())
         );
         for server in ["0.153.0-alpha.10", "0.153.0-alpha.11", "0.153.0"] {
             assert_eq!(
@@ -256,7 +256,7 @@ mod tests {
         }
         assert_eq!(
             server_version_notice("0.155.0-alpha.12", Some("0.156.0")),
-            Some("A background Codex service is running v0.156.0, different from your Codex CLI v0.155.0-alpha.12.".to_string())
+            Some("A background Codex Spark service is running v0.156.0, different from your Codex Spark v0.155.0-alpha.12.".to_string())
         );
     }
 

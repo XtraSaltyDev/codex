@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sqlite3
 import uuid
+from spark_release import VERSION
 
 from health import ClientSession, ClientTimeout, RPC, SparkHealth, check, report
 
@@ -91,7 +92,8 @@ async def diagnose(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="codex-spark doctor", description=__doc__)
+    parser.add_argument('--version', action='version', version='Codex Spark ' + VERSION)
     parser.add_argument('--json', action='store_true', help='Print a machine-readable report')
     parser.add_argument('--live', action='store_true', help='Run one model/tool task in a new diagnostic chat, reconnect, verify, and archive it')
     parser.add_argument('--timeout', type=int, default=90, help='Total live-test deadline in seconds (10–180; default 90)')

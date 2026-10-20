@@ -34,7 +34,7 @@ fn gov_cloud_guidance_scrolls_in_short_panes() {
     for height in [6, 2] {
         let area = Rect::new(0, 0, 24, height);
         let mut seen = String::new();
-        for _ in 0..20 {
+        for _ in 0..40 {
             let mut buffer = Buffer::empty(area);
             state.render(area, &mut buffer, /*error*/ None);
             seen.extend(buffer.content.iter().map(ratatui::buffer::Cell::symbol));
@@ -43,14 +43,25 @@ fn gov_cloud_guidance_scrolls_in_short_panes() {
                 !state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             );
         }
-        assert!(seen.contains("Using Codex with AWS"));
+        assert!(
+            seen.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("Using Codex Spark with AWS")
+        );
         assert!(seen.contains("proceeding."));
         assert!(seen.contains(GOV_CLOUD_GUIDANCE_URL));
-        for _ in 0..20 {
+        for _ in 0..40 {
             state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
             render_visible_at(&state, area);
         }
-        assert!(render_visible_at(&state, area).starts_with("Using Codex with AWS"));
+        assert!(
+            render_visible_at(&state, area)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .starts_with("Using Codex Spark")
+        );
     }
     assert_eq!(render_visible_at(&state, area), initial);
     state.handle_guidance_key_event(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -514,7 +525,8 @@ fn credential_entries_share_region_and_keep_aws_secrets_hidden() {
     insta::assert_snapshot!(render_visible(&access_keys), @r###"
     > Set up Amazon Bedrock
 
-      Configure AWS credentials in your environment, then restart Codex.
+      Configure AWS credentials in your environment, then restart Codex
+    Spark.
 
       Setup guide: https://learn.chatgpt.com/docs/amazon-bedrock
 

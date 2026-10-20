@@ -1040,7 +1040,7 @@ fn plugin_remote_section_error_next_step(label: &str, err: &str) -> &'static str
         || err.contains("plugin sharing is not enabled")
         || err.contains("feature disabled")
     {
-        "Ask a workspace admin to enable Codex plugins or plugin sharing"
+        "Ask a workspace admin to enable Codex Spark plugins or plugin sharing"
     } else if err.contains("workspace") && (err.contains("access") || err.contains("mismatch")) {
         "Switch to the matching workspace or ask the sharer for access"
     } else if err.contains("not found") || err.contains("status 404") {
@@ -1068,7 +1068,8 @@ fn plugin_sharing_disabled_remote_section_error() -> PluginRemoteSectionError {
     PluginRemoteSectionError {
         section_id: "shared-with-me".to_string(),
         label: "Shared with me".to_string(),
-        message: "Enable plugin sharing for this Codex session to load shared plugins".to_string(),
+        message: "Enable plugin sharing for this Codex Spark session to load shared plugins"
+            .to_string(),
     }
 }
 
@@ -1569,7 +1570,7 @@ mod tests {
             (
                 "Shared with me",
                 "plugin sharing is not enabled",
-                "Ask a workspace admin to enable Codex plugins or plugin sharing",
+                "Ask a workspace admin to enable Codex Spark plugins or plugin sharing",
             ),
         ];
 
@@ -1588,8 +1589,9 @@ mod tests {
             PluginRemoteSectionError {
                 section_id: "shared-with-me".to_string(),
                 label: "Shared with me".to_string(),
-                message: "Enable plugin sharing for this Codex session to load shared plugins"
-                    .to_string(),
+                message:
+                    "Enable plugin sharing for this Codex Spark session to load shared plugins"
+                        .to_string(),
             }
         );
     }

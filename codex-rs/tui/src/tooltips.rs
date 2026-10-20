@@ -15,14 +15,15 @@ mod keybinding_tests;
 
 const ANNOUNCEMENT_TIP_URL: &str =
     "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
+// Fork releases use local tips, without upstream product promotions.
+const ANNOUNCEMENTS_ENABLED: bool = false;
 
 const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
 
-const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://chatgpt.com/codex?app-landing-page=true and run `codex app`.";
-const MACOS_APP_TOOLTIP: &str =
-    "Use the **desktop app**. Run `codex app` to open it. It installs automatically if needed.";
-const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `chatgpt`.";
+const WINDOWS_APP_TOOLTIP: &str = "Check your Codex Spark backend with `codex-spark doctor`. Add `--live` to test the model and a terminal tool.";
+const MACOS_APP_TOOLTIP: &str = WINDOWS_APP_TOOLTIP;
+const LINUX_APP_TOOLTIP: &str = WINDOWS_APP_TOOLTIP;
 
 const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
 
@@ -45,7 +46,7 @@ lazy_static! {
     };
 }
 
-/// Pick a random tooltip to show to the user when starting Codex.
+/// Pick a random tooltip to show to the user when starting Codex Spark.
 pub(crate) fn get_tooltip(plan: Option<PlanType>, keymap: &TuiKeymap) -> Option<String> {
     let mut rng = rand::rng();
     preferred_tooltip(&mut rng, plan).or_else(|| pick_tooltip(&mut rng, keymap))
@@ -57,7 +58,8 @@ pub(crate) fn preferred_tooltip<R: Rng + ?Sized>(
     rng: &mut R,
     plan: Option<PlanType>,
 ) -> Option<String> {
-    if let Some(announcement) = announcement::fetch_announcement_tip(plan) {
+    if ANNOUNCEMENTS_ENABLED && let Some(announcement) = announcement::fetch_announcement_tip(plan)
+    {
         return Some(announcement);
     }
 
@@ -179,6 +181,9 @@ pub(crate) mod announcement {
 
     /// Prewarm the cache of the announcement tip.
     pub(crate) fn prewarm(http_client_factory: HttpClientFactory) {
+        if !super::ANNOUNCEMENTS_ENABLED {
+            return;
+        }
         if ANNOUNCEMENT_TIP.get().is_some() {
             return;
         }

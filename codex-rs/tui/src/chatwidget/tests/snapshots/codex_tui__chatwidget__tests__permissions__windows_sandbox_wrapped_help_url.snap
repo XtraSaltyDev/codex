@@ -3,8 +3,8 @@ source: tui/src/chatwidget/tests/permissions.rs
 expression: visible
 ---
                                         
-  Set up the Codex agent sandbox to     
-  protect your files and control        
+  Set up the Codex Spark agent sandbox  
+  to protect your files and control     
   network access. Learn more            
   <https://developers.openai.com/codex  
   /windows>                             

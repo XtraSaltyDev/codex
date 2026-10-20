@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from doctor import live_test, verify_command
 from goose_mobile import Bridge
 from health import SparkHealth, check, report
+from spark_release import VERSION
 from mobile_state import MobileState
 import install_diagnostics
 
@@ -28,6 +29,9 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         help_result = subprocess.run([str(launcher), 'doctor', '--help'], capture_output=True, text=True)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn('--live', help_result.stdout)
+        self.assertIn('codex-spark doctor', help_result.stdout)
+        version_result = subprocess.run([str(launcher), 'doctor', '--version'], capture_output=True, text=True, check=True)
+        self.assertEqual(version_result.stdout.strip(), 'Codex Spark ' + VERSION)
         (self.home / 'missing-token').write_text('test-token')
         ordinary = subprocess.run([str(launcher), '--cd', '/tmp/example folder'], capture_output=True, text=True)
         self.assertEqual(ordinary.returncode, 0, ordinary.stderr)

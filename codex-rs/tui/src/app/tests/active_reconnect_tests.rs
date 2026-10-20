@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 use super::disconnect::serve_reconnect_requests;
+use super::disconnect::serve_reconnect_requests_with_version;
 
 #[tokio::test]
 async fn reconnect_restores_launch_reviewer_without_a_profile_override() -> Result<()> {
@@ -113,15 +114,18 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
                 &app.local_settings.tui,
                 &app.app_server_target,
                 /*server_home*/ None,
-                "2.1.0",
-                Some("2.0.0"),
+                crate::version::CODEX_CLI_VERSION,
+                Some("0.0.9"),
                 /*last_shown*/ None,
             )
             .expect("older server should have a pending notice");
             app.reconnect.seen_version_notice = Some(key);
             if deferred_notice {
                 app.pending_server_version_notice = Some(notice);
-                app.update_server_version_overview_notice("2.1.0", Some("2.0.0"));
+                app.update_server_version_overview_notice(
+                    crate::version::CODEX_CLI_VERSION,
+                    Some("0.0.9"),
+                );
             }
         }
         let thread = json!({
@@ -136,7 +140,7 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             let mut methods = Vec::new();
             for attempt in 0..2 {
                 let (stream, _) = listener.accept().await?;
-                methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| std::future::ready(match request.method.as_str() {
+                methods.extend(serve_reconnect_requests_with_version(tokio_tungstenite::accept_async(stream).await?, "0.0.9", |request| std::future::ready(match request.method.as_str() {
                     "thread/resume" if attempt == 0 => Some(json!({"error": {"code": resume_error_code, "message":
                         if resume_error_code == -32600 {
                             format!("thread {id} is closing; retry thread/resume after the thread is closed")
@@ -222,7 +226,7 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
         app.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
                 &app.app_server_target,
-                Some("1.0.0"),
+                Some("0.0.8"),
             );
         let mut tui = crate::tui::test_support::make_test_tui()?;
         if pending_profile {
@@ -312,8 +316,14 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             paused.contains("TUI is reconnecting; tool was not sent"),
             "{paused}"
         );
-        app.finish_reconnect(&mut tui, &mut session, &mut events, connected, "2.1.0")
-            .await?;
+        app.finish_reconnect(
+            &mut tui,
+            &mut session,
+            &mut events,
+            connected,
+            crate::version::CODEX_CLI_VERSION,
+        )
+        .await?;
         assert_eq!(session.backend_id(), backend_id);
         if edit_offline {
             assert!(!app.chat_widget.has_active_view());
@@ -386,7 +396,7 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             app.chat_widget.remote_connection,
             crate::status::remote_connection::remote_connection_status_value(
                 &app.app_server_target,
-                Some("2.0.0")
+                Some("0.0.9")
             )
         );
         assert!(old_sender.app_event_tx.is_closed());
@@ -416,14 +426,13 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             .lines()
             .filter(|line| {
                 line.contains("Couldn't confirm whether")
-                    || line.contains("background Codex service")
+                    || line.contains("background Codex Spark service")
             })
             .collect::<Vec<_>>()
             .join("\n");
         if deferred_notice {
-            assert_snapshot!(notices, @r###"
-⚠ A background Codex service is running v2.0.0, older than your Codex CLI
-"###);
+            assert!(notices.contains("A background Codex Spark service is running v0.0.9"));
+            assert!(notices.contains("older than"));
         } else if edit_offline {
             assert!(notices.contains("unacknowledged prompt"));
         } else {

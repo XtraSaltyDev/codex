@@ -5,7 +5,7 @@ use clap::Args;
 #[derive(Debug, Args)]
 #[command(
     about = "Remove the legacy Windows sandbox's machine-wide accounts and network rules",
-    after_help = "Run as administrator after stopping apps using the legacy sandbox and its provisioning service, if installed.\nPreserves Codex home, including sandbox directories and filesystem permissions."
+    after_help = "Run as administrator after stopping apps using the legacy sandbox and its provisioning service, if installed.\nPreserves Codex Spark home, including sandbox directories and filesystem permissions."
 )]
 pub(crate) struct SandboxUninstallCommand {}
 

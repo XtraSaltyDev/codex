@@ -30,6 +30,11 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     }
 
     let action = update_action::get_update_action();
+    // Source/custom installs such as Codex Spark are maintained by their fork.
+    // Do not compare their release versions with upstream installer releases.
+    if action.is_none() {
+        return None;
+    }
     let version_file = version_filepath(config);
     let info = read_version_info(&version_file).ok();
 

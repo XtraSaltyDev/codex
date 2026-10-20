@@ -268,7 +268,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         // A shutdown error can cover the initial command center when its first New fails.
         if previous_thread.is_none() && overview_initialized {
             app.show_agents_overview_error(
-                Some("Codex's background server is shutting down"),
+                Some("Codex Spark's background server is shutting down"),
                 "Waiting for active turns.".into(),
             );
         }
@@ -341,7 +341,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
                 if let AppEvent::InsertHistoryCell(cell) = &event {
                     let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 100));
                     if rendered.contains("Windows sandbox setup was interrupted") {
-                        insta::assert_snapshot!(rendered, @"■ Windows sandbox setup was interrupted. Restart Codex before using Agent mode.");
+                        insta::assert_snapshot!(rendered, @"■ Windows sandbox setup was interrupted. Restart Codex Spark before using Agent mode.");
                         saw_warning = true;
                         continue;
                     }

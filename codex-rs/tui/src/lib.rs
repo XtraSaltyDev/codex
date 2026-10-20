@@ -2862,7 +2862,7 @@ requires_openai_auth = {requires_openai_auth}
             .expect_err("Guardian resume should be rejected");
         insta::assert_snapshot!(error.to_string(), @"
         Cannot resume a Guardian review thread.
-        Resume its parent session instead: codex resume 00000000-0000-0000-0000-000000000001
+        Resume its parent session instead: codex-spark resume 00000000-0000-0000-0000-000000000001
         ");
         app_server.shutdown().await?;
         Ok(())

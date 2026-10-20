@@ -5,7 +5,7 @@ expression: "states.join(\"\\n\\n\")"
 connecting:
  voice ◌ connecting                                                 /voice stop
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible
 
@@ -13,7 +13,7 @@ listening:
  voice ● listening                                      f9 mute     /voice stop
    mic ▁▁▁▁▁▁  codex ▁▁▁▁▁▁
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible
 
@@ -21,7 +21,7 @@ speaking:
  voice ● speaking                                       f9 mute     /voice stop
    mic ▁▁▇▇▇▇  codex ▁▁████
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible
 
@@ -29,7 +29,7 @@ muted:
  voice ◌ muted                                          f9 unmute   /voice stop
    mic ▁▁▁▁▁▁  codex ▁▁▇▇▇▇
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible
 
@@ -37,7 +37,7 @@ transcript:
  voice ● speaking                                       f9 mute     /voice stop
    mic ▁▁▄▄▄▄  codex ▁▁▄▄▄▄
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible
 
@@ -45,6 +45,6 @@ interrupted:
  voice ● heard                                          f9 mute     /voice stop
    mic ▁▁▄▄▄▄  codex ▁▁▄▄▄▄
 
-› Ask Codex to do anything
+› Ask Codex Spark to do anything
 
   status line stays visible

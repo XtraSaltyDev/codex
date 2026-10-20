@@ -12,7 +12,7 @@ pub(super) fn permission_preset_description(preset: &ApprovalPreset) -> &'static
             "Read and edit workspace files and run commands, with approval required for internet access or edits outside the workspace"
         }
         "full-access" => {
-            "Use with caution: Codex can edit files outside this workspace and access the internet without approval"
+            "Use with caution: Codex Spark can edit files outside this workspace and access the internet without approval"
         }
         _ => preset.description,
     }

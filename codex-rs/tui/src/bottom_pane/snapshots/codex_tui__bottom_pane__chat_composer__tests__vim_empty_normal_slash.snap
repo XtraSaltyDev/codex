@@ -2,11 +2,11 @@
 source: tui/src/bottom_pane/chat_composer.rs
 expression: terminal.backend()
 ---
-"› /model          choose what model and reasoning effort to "
-"                  use                                       "
-"  /presets        run or save reusable prompts and slash    "
-"                  commands                                  "
-"  /ide            include current selection, open files, and"
+"› /model         choose what model and reasoning effort to  "
+"                 use                                        "
+"  /presets       run or save reusable prompts and slash     "
+"                 commands                                   "
+"  /ide           include current selection, open files, and "
 "                                                            "
 "/                                                           "
 "                                                            "

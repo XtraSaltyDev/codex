@@ -25,7 +25,7 @@ pub(super) fn background_terminals_blocker(
                             || source.message.contains("unknown method"))) =>
         {
             Some(
-                "The local Codex service cannot check background terminals. Run `codex app-server daemon update`, then restart Codex.",
+                "The local Codex Spark service cannot check background terminals. Run `codex-spark app-server daemon update`, then restart Codex Spark.",
             )
         }
         _ => Some("Active background terminals block /cd."),
@@ -261,7 +261,7 @@ impl App {
             Ok(_) => {
                 return self.retained_worktree_error(
                     &checkout,
-                    "The new worktree is not trusted; run Codex there.",
+                    "The new worktree is not trusted; run Codex Spark there.",
                 );
             }
             Err(error) => {

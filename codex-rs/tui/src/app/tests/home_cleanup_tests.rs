@@ -1,4 +1,4 @@
-//! Verifies that app fixtures own their Codex homes across widget replacement.
+//! Verifies that app fixtures own their Codex Spark homes across widget replacement.
 
 use super::*;
 use pretty_assertions::assert_eq;

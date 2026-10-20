@@ -1159,7 +1159,7 @@ async fn startup_config_warning_is_not_repeated_by_thread() {
                     is_managed_daemon: managed_daemon,
                 });
         }
-        let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
+        let message = "Codex Spark is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
         for notification in [
             ServerNotification::ConfigWarning(ConfigWarningNotification {
                 summary: message.to_string(),
@@ -2215,7 +2215,7 @@ async fn sqlite_log_write_warning_is_visible_in_warnings() {
     chat.handle_server_notification(
         ServerNotification::Warning(WarningNotification {
             thread_id: None,
-            message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.".to_string(),
+            message: "Codex Spark couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.".to_string(),
         }),
         /*replay_kind*/ None,
     );

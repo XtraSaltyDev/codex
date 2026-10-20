@@ -9,7 +9,7 @@ expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-bu
 
 
 
-      Update daemon and exit Codex?
+      Update daemon and exit Codex Spark?
       Install the latest public stable release. Restore production
       updates; keep your automatic-update setting.
       This may restart the daemon and interrupt active or queued work.
@@ -25,4 +25,4 @@ expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-bu
 
 
 
-  Service v0.153.0 < Codex CLI v0.154.0 · /daemon
+  Service v0.153.0 < Codex Spark v0.154.0 · /daemon

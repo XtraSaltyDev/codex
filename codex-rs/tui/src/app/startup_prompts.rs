@@ -135,7 +135,7 @@ pub(super) fn model_upgrade_for_migration(
         _ => return None,
     };
     let availability = if model == "openai.gpt-5.4" {
-        "no longer offered in Codex"
+        "no longer offered in Codex Spark"
     } else {
         "no longer available"
     };

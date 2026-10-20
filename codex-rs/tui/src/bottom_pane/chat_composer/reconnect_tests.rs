@@ -139,6 +139,7 @@ fn unavailable_thread_dispatches_recovery_and_local_commands() {
         SlashCommand::Status,
         SlashCommand::DebugConfig,
         SlashCommand::Pwd,
+        #[cfg(debug_assertions)]
         SlashCommand::Rollout,
         SlashCommand::Copy,
         SlashCommand::Raw,

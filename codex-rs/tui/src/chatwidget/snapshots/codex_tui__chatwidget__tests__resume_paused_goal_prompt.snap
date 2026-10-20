@@ -3,7 +3,7 @@ source: tui/src/chatwidget/tests/goal_menu.rs
 expression: "render_bottom_popup(&chat, 100)"
 ---
                 Resume paused goal?
-› Ask Codex to  Goal: Keep improving the bare goal command until it feels calm and
+› Ask Codex Sp  Goal: Keep improving the bare goal command until it feels calm and
                 useful.
   GPT-5.6-Sol
 

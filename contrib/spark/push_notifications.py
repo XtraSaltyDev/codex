@@ -11,9 +11,9 @@ import uuid
 
 
 KINDS = {
-    'completed': ('Task completed', 'Your Codex task is ready to review.'),
+    'completed': ('Task completed', 'Your Codex Spark task is ready to review.'),
     'failed': ('Task failed', 'Open Goose to review the saved task.'),
-    'input': ('Codex needs your input', 'Open Goose to respond.'),
+    'input': ('Codex Spark needs your input', 'Open Goose to respond.'),
 }
 
 

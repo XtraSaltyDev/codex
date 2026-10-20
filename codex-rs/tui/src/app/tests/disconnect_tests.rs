@@ -376,7 +376,19 @@ async fn remote_disconnect_retires_voice_before_reconnecting() -> Result<()> {
 
 // Common framing/bootstrap for both transports. Returning None deliberately loses a reply.
 pub(super) async fn serve_reconnect_requests<S, F>(
+    socket: tokio_tungstenite::WebSocketStream<S>,
+    respond: impl FnMut(JSONRPCRequest) -> F,
+) -> Result<Vec<String>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: std::future::Future<Output = Option<serde_json::Value>>,
+{
+    serve_reconnect_requests_with_version(socket, "2.0.0", respond).await
+}
+
+pub(super) async fn serve_reconnect_requests_with_version<S, F>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
+    version: &str,
     mut respond: impl FnMut(JSONRPCRequest) -> F,
 ) -> Result<Vec<String>>
 where
@@ -392,7 +404,9 @@ where
         methods.push(request.method.clone());
         let request_id = request.id.clone();
         let response = match request.method.as_str() {
-            "initialize" => Some(json!({"result": {"userAgent": "reconnect-test/2.0.0"}})),
+            "initialize" => {
+                Some(json!({"result": {"userAgent": format!("reconnect-test/{version}")}}))
+            }
             "account/read" => {
                 Some(json!({"result": {"account": null, "requiresOpenaiAuth": false}}))
             }
