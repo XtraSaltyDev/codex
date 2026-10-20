@@ -19,6 +19,43 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_projectless_chats_use_separate_folders_in_configured_codex_root(self):
+        root = Path(self.temp.name).resolve() / 'Codex'
+        token = Path(self.temp.name) / 'token'
+        bridge = Bridge(Path(self.temp.name) / 'new-state', token, token, projectless_root=root)
+        self.addCleanup(bridge.journal.close)
+        bridge.clients[self.phone] = set()
+        calls = []
+        async def request(method, params):
+            self.assertEqual(method, 'thread/start')
+            calls.append(params)
+            return {'thread': {'id': 'new-' + str(len(calls))}, 'model': 'test-model'}
+        bridge.rpc.request = request
+        results = [await bridge.dispatch(self.phone, 'session/new', {'_meta': {'workspace': {'kind': 'projectless'}}}) for _ in range(2)]
+        directories = [Path(result['_meta']['workingDir']) for result in results]
+        self.assertEqual(len(set(directories)), 2)
+        for directory in directories:
+            self.assertEqual(directory.parent, root)
+            self.assertTrue(directory.is_dir())
+        listed = await bridge.dispatch(self.phone, '_goose/unstable/workspaces', {})
+        self.assertEqual(listed['projectlessRoot'], str(root))
+        self.assertEqual(listed['projects'], [])
+        self.assertTrue(all(call['sandbox'] == 'danger-full-access' for call in calls))
+
+    async def test_project_selection_and_added_folder_return_canonical_host_paths(self):
+        project = Path(self.temp.name).resolve() / 'project with spaces'
+        project.mkdir()
+        alias = str(project / '..' / project.name)
+        added = await self.bridge.dispatch(self.phone, '_goose/unstable/workspaces', {'action': 'add', 'path': alias})
+        self.assertEqual(added['addedProject'], {'path': str(project), 'name': project.name})
+        async def request(method, params):
+            self.assertEqual(params['cwd'], str(project))
+            return {'thread': {'id': 'selected-project'}, 'model': 'test-model'}
+        self.bridge.rpc.request = request
+        result = await self.bridge.dispatch(self.phone, 'session/new', {'_meta': {'workspace': {'kind': 'project', 'path': alias}}})
+        self.assertEqual(result['_meta']['workspace'], {'kind': 'project', 'path': str(project)})
+        self.assertEqual(result['_meta']['workingDir'], str(project))
+
     async def test_initialize_reports_backend_without_exposing_provider_credentials(self):
         self.bridge.rpc.ready.set()
         async def request(method, params):

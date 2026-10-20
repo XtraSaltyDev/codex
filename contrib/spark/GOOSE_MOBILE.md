@@ -90,6 +90,14 @@ use legacy history mode for full ACP transcript replay. Model execution remains 
 the existing Spark provider. This adapter does not advertise a model picker; change
 the backend model through the isolated Codex Spark configuration.
 
+New-chat composition shows the execution host and a folder menu above the composer.
+Choose a saved project, add an existing host folder, or choose **Don't work in a
+project**. Folder selection and the unsent draft are saved per host on the phone;
+the backend conversation is created only when the first message is sent. New
+projectless chats get separate folders under `~/Codex` on ai-research (override
+with the adapter's `--projectless-root` option). Earlier chats retain their original
+working folders and files. This selector does not move an existing conversation.
+
 New mobile chats default to full access with approvals disabled, matching the direct
 CLI profile. The adapter saves that choice per chat so ordinary turns retain it
 after reconnects, restarts, and recovery reviews. Existing workspace chats keep their

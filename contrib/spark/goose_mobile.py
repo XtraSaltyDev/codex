@@ -141,7 +141,7 @@ class CodexRPC:
 
 
 class Bridge:
-    def __init__(self, state, token, upstream_token, upstream_url='ws://127.0.0.1:4500'):
+    def __init__(self, state, token, upstream_token, upstream_url='ws://127.0.0.1:4500', projectless_root=None):
         self.state = Path(state)
         self.state.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.state / 'metadata.json'
@@ -163,8 +163,8 @@ class Bridge:
         self.stream_locks = {}
         self.backend = {}
         self.health_probe = SparkHealth(state=self.state, upstream_url=upstream_url)
-        self.root = self.state / 'chats'
-        self.root.mkdir(exist_ok=True)
+        self.root = Path(projectless_root).expanduser().resolve() if projectless_root is not None else self.state / 'chats'
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def status(self, turn):
         status = run_status(turn)
@@ -474,7 +474,7 @@ class Bridge:
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': '1.0.0'}, 'authMethods': [],
                     'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
-                                                              'workspaceAssignment': False, 'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
+                                                              'workspaceAssignment': False, 'newChatWorkspaces': True, 'backend': self.backend, 'healthStatus': True, 'customNotifications': True}}}}
         if method == '_goose/unstable/workspaces':
             action = params.get('action', 'list')
             if action == 'add':
@@ -485,7 +485,10 @@ class Bridge:
                     self.metadata['projects'].append(path); self.save()
             elif action == 'assign':
                 raise RPCError('Moving an existing Codex conversation to another folder is not supported. Start a new chat in that folder.')
-            return {'projectlessRoot': str(self.root), 'projects': [{'path': p, 'name': Path(p).name} for p in self.metadata['projects']]}
+            result = {'projectlessRoot': str(self.root), 'projects': [{'path': p, 'name': Path(p).name} for p in self.metadata['projects']]}
+            if action == 'add':
+                result['addedProject'] = {'path': path, 'name': Path(path).name}
+            return result
         if method == 'session/list':
             query = params.get('_meta', {}).get('query', '')
             cursor = json.loads(params['cursor']) if params.get('cursor') else {'archived': False, 'cursor': None, 'query': query}
@@ -512,6 +515,7 @@ class Bridge:
                 cwd = Path(workspace.get('path') or params['cwd']).expanduser().resolve(strict=True)
                 if not cwd.is_dir():
                     raise RPCError('Choose an existing directory on ai-research.')
+                workspace = {'kind': 'project', 'path': str(cwd)}
             response = await self.rpc.request('thread/start', {'cwd': str(cwd), 'approvalPolicy': 'never', 'sandbox': 'danger-full-access', 'historyMode': 'legacy'})
             thread = response['thread']; identity = thread['id']
             self.loaded.add(identity); self.clients[ws].add(identity)
@@ -668,10 +672,11 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=3285)
+    parser.add_argument('--projectless-root', type=Path, default=Path.home() / 'Codex')
     args = parser.parse_args()
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     home = Path.home()
-    bridge = Bridge(home / '.local/state/codex-spark/mobile', home / '.config/codex-spark/mobile.token', home / '.config/codex-spark/server.token')
+    bridge = Bridge(home / '.local/state/codex-spark/mobile', home / '.config/codex-spark/mobile.token', home / '.config/codex-spark/server.token', projectless_root=args.projectless_root)
     bridge.health_probe.mobile_url = f'ws://127.0.0.1:{args.port}/acp'
     web.run_app(app(bridge), host='127.0.0.1', port=args.port, access_log=None)
