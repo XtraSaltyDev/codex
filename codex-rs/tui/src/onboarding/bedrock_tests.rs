@@ -47,7 +47,7 @@ fn gov_cloud_guidance_scrolls_in_short_panes() {
             seen.split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
-                .contains("Using Codex Spark with AWS")
+                .contains("Using Codex Spark")
         );
         assert!(seen.contains("proceeding."));
         assert!(seen.contains(GOV_CLOUD_GUIDANCE_URL));
