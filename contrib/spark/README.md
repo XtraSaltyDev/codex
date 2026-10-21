@@ -212,6 +212,26 @@ New installations include it through `configure.py` and `configure_goose_mobile.
 
 ## Coding acceptance
 
+Mobile failed turns carry a bounded, credential-redacted `error` in the live
+`hostRun` and saved `hostRuns`, plus the prompt RPC error. The error includes a
+category, message and output-limit flag; private `additionalDetails` stay on the
+host. Nonterminal retry errors and cancellations do not become failed responses.
+Duplicate receipts return the saved failure without dispatching another turn.
+
+Verify the installed adapter with a real Spark context-limit rejection and a
+successful follow-up:
+
+```sh
+python3 contrib/spark/smoke_mobile_errors.py --report-dir /tmp/mobile-error-check
+```
+
+This creates one disposable chat in the existing Codex project. A loopback relay
+used only by that chat sends synthetic oversized input to Spark, forwarding its
+actual rejection through the native runtime. It deletes the chat in `finally` and
+checks the complete chat/project inventory and unchanged profile/binary hashes.
+For physical-phone verification, `--hold 900` waits for a `release` file in the
+report directory; send the failure prompt and a follow-up from that owned chat.
+
 Verify planning and patch handling against the live Spark model in a disposable
 project:
 

@@ -5,6 +5,8 @@ import json
 import os
 import sqlite3
 
+from work_review import visible_text
+
 
 def merge_items(native, saved):
     items = {}
@@ -82,7 +84,9 @@ class MobileState:
 
     def record_event(self, thread, packet):
         method = packet['method']; params = packet.get('params', {})
-        if method not in ('turn/started', 'turn/completed', 'turn/plan/updated', 'item/started', 'item/completed', 'item/agentMessage/delta'):
+        if method not in ('error', 'turn/started', 'turn/completed', 'turn/plan/updated', 'item/started', 'item/completed', 'item/agentMessage/delta'):
+            return None
+        if method == 'error' and (params.get('willRetry', True) or not params.get('turnId')):
             return None
         turn_id = params.get('turnId') or params.get('turn', {}).get('id')
         row = self.db.execute('SELECT snapshot FROM turns WHERE id=?', (turn_id,)).fetchone() if turn_id else None
@@ -94,7 +98,12 @@ class MobileState:
         if not turn['id']:
             return None
         items = {i['id']: i for i in turn.get('items', [])}
-        if method == 'turn/plan/updated':
+        if method == 'error':
+            # A terminal notification can precede a completion without its own error field.
+            message, truncated = visible_text(params.get('error', {}).get('message') or 'The task failed.', 2048)
+            turn['_mobileError'] = {'message': message, 'messageTruncated': truncated,
+                                   'codexErrorInfo': params.get('error', {}).get('codexErrorInfo')}
+        elif method == 'turn/plan/updated':
             turn['plan'] = params['plan']
             turn['planExplanation'] = params.get('explanation')
         elif method.startswith('turn/'):

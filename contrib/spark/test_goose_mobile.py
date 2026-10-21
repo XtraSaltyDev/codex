@@ -5,9 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from goose_mobile import Bridge, RPCError, item_update, run_status
+from goose_mobile import Bridge, RPCError, item_update, run_status, turn_failure
 from mobile_state import merge_items
 
 
@@ -22,6 +22,72 @@ class Socket:
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failure_cause_survives_live_rpc_replay_restart_and_duplicate_receipt(self):
+        self.bridge.complete_review = AsyncMock()
+        async def loaded(identity, include_turns=False):
+            return {'id': identity, 'cwd': self.temp.name, 'updatedAt': 1, 'status': {'type': 'idle'}}
+        self.bridge.ensure_loaded = loaded
+        for index, (info, message, category) in enumerate([
+            ('contextWindowExceeded', 'The context window is full.', 'context_limit'),
+            ('other', 'Incomplete response returned, reason: max_output_tokens', 'output_limit'),
+            ('rateLimitExceeded', 'Rate limit exceeded. Try again shortly.', 'rate_limit'),
+            ({'httpConnectionFailed': {'httpStatusCode': 503}}, 'Provider is unavailable.', 'connection'),
+        ]):
+            with self.subTest(category=category):
+                turn = {'id': f'failed-{index}', 'status': 'inProgress', 'items': [
+                    {'id': f'user-{index}', 'type': 'userMessage', 'content': [{'type': 'text', 'text': 'Test'}]}]}
+                calls = []
+                async def request(method, params):
+                    calls.append(method)
+                    await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': turn}})
+                    error = {'message': message, 'codexErrorInfo': info, 'additionalDetails': 'PRIVATE HOST DIAGNOSTICS'}
+                    await self.bridge.event({'method': 'error', 'params': {'threadId': 'thread-a', 'turnId': turn['id'], 'error': error, 'willRetry': False}})
+                    await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {**turn, 'status': 'failed', 'error': error}}})
+                    return {'turn': turn}
+                self.bridge.rpc.request = request
+                params = {'sessionId': 'thread-a', 'prompt': [{'type': 'text', 'text': 'Test'}],
+                          '_meta': {'goose': {'requestId': f'failed-request-{index}'}}}
+                for _ in range(2):
+                    await self.bridge.handle_packet(self.phone, {'id': index, 'method': 'session/prompt', 'params': params})
+                    failure = self.phone.packets[-1]['error']
+                    self.assertEqual(failure['message'], message)
+                    self.assertEqual(failure['data']['error']['category'], category)
+                self.assertEqual(calls, ['turn/start'])
+                replay = await self.bridge.dispatch(self.phone, 'session/load', {'sessionId': 'thread-a'})
+                status = replay['_meta']['hostRuns'][-1]
+                self.assertEqual(status['error'], failure['data']['error'])
+                self.assertEqual(status['userMessageId'], f'user-{index}')
+                self.assertEqual(status['error']['outputTokenLimitReached'], category == 'output_limit')
+                self.assertNotIn('PRIVATE HOST DIAGNOSTICS', json.dumps(self.phone.packets))
+        restarted = Bridge(self.bridge.state, Path(self.temp.name) / 'token', Path(self.temp.name) / 'token', push_config=Path(self.temp.name) / 'no-push')
+        self.addCleanup(restarted.journal.close)
+        self.assertEqual(restarted.status(restarted.journal.turns('thread-a')[-1]['snapshot'])['error']['category'], 'connection')
+
+    async def test_terminal_notification_is_fallback_only_and_retry_is_not_a_failure(self):
+        turn = {'id': 'retry', 'status': 'inProgress', 'items': []}
+        await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': turn}})
+        for retry in (True, False):
+            await self.bridge.event({'method': 'error', 'params': {'threadId': 'thread-a', 'turnId': 'retry',
+                'error': {'message': 'The context window is full.', 'codexErrorInfo': 'contextWindowExceeded'}, 'willRetry': retry}})
+            self.assertNotIn('error', run_status(self.bridge.turns['thread-a']))
+            if retry:
+                self.assertNotIn('_mobileError', self.bridge.turns['thread-a'])
+        await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {**turn, 'status': 'failed', 'error': None}}})
+        self.assertEqual(run_status(self.bridge.turns['thread-a'])['error']['category'], 'context_limit')
+        for state in ('completed', 'interrupted', 'backendInterrupted'):
+            self.assertNotIn('error', run_status({**self.bridge.turns['thread-a'], 'status': state}))
+
+    def test_mobile_failure_is_bounded_and_redacted_without_private_diagnostics(self):
+        failure = turn_failure({'status': 'failed', 'error': {'message': '\x1b[31mProvider failed: Authorization: Bearer private-token api_key=private-key https://user:password@example.com ' + '🙂' * 3000,
+            'additionalDetails': 'PRIVATE DETAILS'}})
+        self.assertLessEqual(len(failure['message'].encode()), 2048)
+        self.assertTrue(failure['messageTruncated'])
+        self.assertNotIn('private-token', failure['message'])
+        self.assertNotIn('private-key', failure['message'])
+        self.assertNotIn('user:password', failure['message'])
+        self.assertNotIn('\x1b', failure['message'])
+        self.assertNotIn('PRIVATE DETAILS', str(failure))
+
     async def test_native_cancellation_does_not_generate_a_failure_notification(self):
         await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': {'id': 'cancelled', 'status': 'inProgress', 'items': []}}})
         await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': 'cancelled', 'status': 'interrupted', 'items': []}}})
@@ -482,7 +548,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.event({'method': 'item/agentMessage/delta', 'params': {'threadId': 'thread-a', 'itemId': identity, 'delta': text}})
         future = asyncio.get_running_loop().create_future(); self.bridge.waiters['thread-a'] = future
         await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': 'turn-a', 'status': 'completed', 'items': []}}})
-        self.assertEqual(await future, 'completed')
+        self.assertEqual((await future)['status'], 'completed')
         status = self.phone.packets[-1]['params']['update']['_meta']['goose']['hostRun']
         self.assertEqual(status['finalMessageId'], 'final')
         self.assertEqual(status['state'], 'finished')

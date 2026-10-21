@@ -28,9 +28,10 @@ import mobile_workspace
 
 
 class RPCError(Exception):
-    def __init__(self, message, code=-32602):
+    def __init__(self, message, code=-32602, data=None):
         super().__init__(message)
         self.code = code
+        self.data = data
 
 
 def iso(timestamp=None):
@@ -76,11 +77,37 @@ def browse_folders(params):
         raise RPCError(f'Cannot open or create this folder: {error}') from error
 
 
+def turn_failure(turn):
+    if turn.get('status') != 'failed':
+        return None
+    error = turn.get('error') or turn.get('_mobileError') or {}
+    message, truncated = visible_text(error.get('message') or 'The task failed. Send a message to try again.', 2048)
+    info = error.get('codexErrorInfo')
+    kind = info if isinstance(info, str) else next(iter(info or {}), '')
+    category = {'contextWindowExceeded': 'context_limit', 'rateLimitExceeded': 'rate_limit',
+                'usageLimitExceeded': 'usage_limit', 'unauthorized': 'authentication',
+                'httpConnectionFailed': 'connection', 'responseStreamConnectionFailed': 'connection',
+                'responseStreamDisconnected': 'connection', 'serverOverloaded': 'overloaded',
+                'badRequest': 'invalid_request'}.get(kind, 'turn_failed')
+    output_limit = 'incomplete response returned, reason: max_output_tokens' in message.lower()
+    if output_limit:
+        category = 'output_limit'
+    return {'category': category, 'message': message.strip() or 'The task failed. Send a message to try again.',
+            'messageTruncated': truncated or error.get('messageTruncated', False),
+            'outputTokenLimitReached': output_limit}
+
+
+def failed_turn_error(turn):
+    failure = turn_failure(turn)
+    return RPCError(failure['message'], -32000, {'reason': 'turn_failed', 'runId': turn['id'], 'error': failure})
+
+
 def run_status(turn):
     items = turn.get('items', [])
     users = [i['id'] for i in items if i['type'] == 'userMessage']
     answers = [i['id'] for i in items if i['type'] == 'agentMessage' and i.get('text')]
     return {'id': turn['id'], 'state': {'completed': 'finished', 'inProgress': 'running', 'interrupted': 'cancelled', 'failed': 'failed', 'backendInterrupted': 'interrupted'}.get(turn['status'], 'interrupted'),
+            **({'error': turn_failure(turn)} if turn['status'] == 'failed' else {}),
             'userMessageId': users[0] if users else None, 'finalMessageId': answers[-1] if answers else None}
 
 
@@ -340,6 +367,8 @@ class Bridge:
                     turn = next((r['snapshot'] for r in self.journal.turns(identity) if r['id'] == submission['turn']), None)
                     if turn and turn['status'] == 'backendInterrupted':
                         raise RPCError('This message was already submitted. Load its saved progress; it will not be sent or executed again.', -32011)
+                    if turn and turn['status'] == 'failed':
+                        raise failed_turn_error(turn)
                     return {'stopReason': 'end_turn' if turn and turn['status'] == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
                 elif submission['phase'] == 'accepted' and self.turns.get(identity, {}).get('status') == 'inProgress':
                     future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
@@ -376,9 +405,10 @@ class Bridge:
                 except Exception:
                     self.waiters.pop(identity, None); self.inflight.pop(identity, None)
                     raise
-        status = await asyncio.shield(future)
+        turn = await asyncio.shield(future)
+        status = turn['status']
         if status == 'failed':
-            raise RPCError('The Codex Spark turn failed. Saved history is available; check the host log.', -32000)
+            raise failed_turn_error(turn)
         if status == 'completed' and not review:
             self.titles.schedule(identity, text)
         return {'stopReason': 'end_turn' if status == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
@@ -495,7 +525,7 @@ class Bridge:
                 if turn['status'] == 'backendInterrupted':
                     future.set_exception(RPCError('Backend work was interrupted. Saved progress is available for read-only review; the request will not be repeated.', -32010))
                 else:
-                    future.set_result(turn['status'])
+                    future.set_result(turn)
         elif method == 'thread/name/updated':
             self.titles.cancel(identity)
             await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': params.get('threadName') or params.get('name') or 'New chat'})
@@ -918,6 +948,8 @@ class Bridge:
             response = {'result': result}
         except RPCError as error:
             response = {'error': {'code': error.code, 'message': str(error)}}
+            if error.data is not None:
+                response['error']['data'] = error.data
         except Exception as error:
             logging.exception('Mobile method failed: %s', packet['method'])
             response = {'error': {'code': -32603, 'message': 'Host request failed: ' + type(error).__name__}}
