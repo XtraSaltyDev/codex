@@ -149,6 +149,7 @@ class ReviewStreamingTests(unittest.IsolatedAsyncioTestCase):
                 closed = False
                 def __init__(self): self.packets = []
                 async def send_json(self, packet): self.packets.append(packet)
+                async def send_str(self, payload): await self.send_json(json.loads(payload))
             phone = Socket(); bridge.clients[phone] = {'thread'}
             bridge.journal.prepare('request', 'thread', 'do work')
             bridge.journal.phase('request', 'accepted', 'turn')

@@ -212,6 +212,28 @@ New installations include it through `configure.py` and `configure_goose_mobile.
 
 ## Coding acceptance
 
+Each mobile connection has one ordered sender, independent of the native reader.
+Failed or backlogged senders are disconnected without interrupting their runs.
+The live queue is capped at 256 messages or 16 MiB, including the in-flight message;
+each frame has a ten-second send deadline and socket closure is bounded to one
+second. History is sent lazily from at most two queued snapshots, followed by live
+events in order. Existing history replay restores an evicted connection without
+automatically resending a prompt or tool action.
+
+On the Linux deployment, verify real TCP backpressure alongside real Spark work:
+
+```sh
+python3 contrib/spark/smoke_mobile_delivery.py --report-dir /tmp/mobile-delivery-check
+```
+
+This uses two disposable chats in the existing project. One retains an oversized
+synthetic user message for a stalled reader; the other receives normal Spark
+answers. The check measures the kernel's blocked send queue, native RPC latency,
+healthy streamed chunks, eviction, and unchanged inventory after deleting both
+chats. `--hold 900` cycles stalled peers during physical-phone verification until
+a `release` file appears in the report directory. No provider/profile change or
+native restart is required.
+
 Mobile failed turns carry a bounded, credential-redacted `error` in the live
 `hostRun` and saved `hostRuns`, plus the prompt RPC error. The error includes a
 category, message and output-limit flag; private `additionalDetails` stay on the

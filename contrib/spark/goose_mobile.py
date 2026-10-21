@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import copy
 import datetime as dt
 import hmac
 import json
@@ -22,6 +23,7 @@ from health import SparkHealth
 from spark_release import VERSION
 from work_review import capture as capture_review, finish as finish_review, visible_text
 from push_notifications import PushNotifications
+from mobile_delivery import MobileDelivery
 from thread_titles import ThreadTitles
 import mobile_options
 import mobile_workspace
@@ -117,6 +119,18 @@ def plan_update(turn):
                          'status': 'in_progress' if step['status'] == 'inProgress' else step['status']}
                         for step in turn['plan']],
             '_meta': {'goose': {'turnId': turn['id'], 'explanation': turn.get('planExplanation')}}}
+
+
+def history_updates(turns):
+    for turn in turns:
+        pending_plan = plan_update(turn) if 'plan' in turn else None
+        for item in turn.get('items', []):
+            if pending_plan and item['type'] != 'userMessage':
+                yield pending_plan
+                pending_plan = None
+            yield from item_updates(item)
+        if pending_plan:
+            yield pending_plan
 
 
 def item_update(item, completed=True):
@@ -227,7 +241,8 @@ class CodexRPC:
                         if not future.done():
                             future.set_exception(RPCError('Backend connection interrupted. Saved progress will be restored; the request will not be resent.', -32010))
                     self.bridge.waiters.clear()
-                    await asyncio.gather(*(ws.close(code=1012, message=b'Backend reconnecting; do not resend') for ws in list(self.bridge.clients)), return_exceptions=True)
+                    for ws in list(self.bridge.clients):
+                        self.bridge.disconnect(ws, code=1012, reason='Backend reconnecting; do not resend')
                     if reader:
                         reader.cancel()
                         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -252,6 +267,8 @@ class Bridge:
         self.upstream_url = upstream_url
         self.rpc = CodexRPC(self)
         self.clients = {}
+        self.deliveries = {}
+        self.transports = {}
         self.loading = set()
         self.loaded = set()
         self.turns = {}
@@ -259,6 +276,7 @@ class Bridge:
         self.waiters = {}
         self.permissions = {}
         self.tasks = set()
+        self.delivery_tasks = set()
         self.titles = ThreadTitles(self)
         self.locks = {}
         self.stream_locks = {}
@@ -425,16 +443,49 @@ class Bridge:
             result = await asyncio.to_thread(finish_review, pending['baseline'], interrupted)
             self.journal.finish_review(pending['request'], result)
 
-    def spawn(self, coroutine):
+    def spawn(self, coroutine, tasks=None):
+        tasks = self.tasks if tasks is None else tasks
         task = asyncio.create_task(coroutine)
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
         return task
 
     async def send(self, ws, packet):
-        if not ws.closed:
-            with contextlib.suppress(ConnectionError, RuntimeError, TimeoutError):
-                await asyncio.wait_for(ws.send_json({'jsonrpc': '2.0', **packet}), 10)
+        delivery = self.delivery(ws)
+        if delivery:
+            delivery.offer(packet)
+            await asyncio.sleep(0)
+
+    def delivery(self, ws):
+        if ws not in self.clients:
+            return None
+        if ws.closed:
+            self.disconnect(ws)
+            return None
+        if ws not in self.deliveries:
+            self.deliveries[ws] = MobileDelivery(ws, lambda coroutine: self.spawn(coroutine, self.delivery_tasks),
+                                                 lambda reason: self.disconnect(ws, reason=reason))
+        return self.deliveries[ws]
+
+    def disconnect(self, ws, code=1013, reason='Reconnect to load saved progress'):
+        registered = self.clients.pop(ws, None) is not None
+        self.loading = {key for key in self.loading if key[0] is not ws}
+        delivery = self.deliveries.pop(ws, None)
+        transport = self.transports.pop(ws, None)
+        if delivery:
+            delivery.stop()
+        if registered and not ws.closed:
+            if code == 1013:
+                logging.warning('%s', reason)
+            async def close():
+                try:
+                    with contextlib.suppress(Exception):
+                        async with asyncio.timeout(1):
+                            await ws.close(code=code, message=reason.encode('utf-8'))
+                finally:
+                    if transport:
+                        transport.abort()
+            return self.spawn(close(), self.delivery_tasks)
 
     async def update(self, identity, update, only=None):
         packet = {'method': 'session/update', 'params': {'sessionId': identity, 'update': update}}
@@ -530,7 +581,7 @@ class Bridge:
             self.titles.cancel(identity)
             await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': params.get('threadName') or params.get('name') or 'New chat'})
 
-    async def deliver_permission(self, key, only=None):
+    def permission_message(self, key):
         packet = self.permissions[key]['packet']
         params = packet['params']; identity = params['threadId']
         if packet['method'] == 'item/tool/requestUserInput':
@@ -540,6 +591,11 @@ class Bridge:
             message = {'id': key, 'method': 'session/request_permission', 'params': {'sessionId': identity,
                        'toolCall': {'toolCallId': params['itemId'], 'title': params.get('command') or params.get('reason') or 'Allow file change outside the workspace?', 'rawInput': params},
                        'options': [{'optionId': 'accept', 'name': 'Allow once', 'kind': 'allow_once'}, {'optionId': 'decline', 'name': 'Decline', 'kind': 'reject_once'}]}}
+        return message
+
+    async def deliver_permission(self, key, only=None):
+        identity = self.permissions[key]['packet']['params']['threadId']
+        message = self.permission_message(key)
         clients = [only] if only is not None else [ws for ws, ids in self.clients.items() if identity in ids]
         await asyncio.gather(*(self.send(ws, message) for ws in clients))
 
@@ -851,23 +907,21 @@ class Bridge:
                     turns = self.saved_history(identity, thread)
                     active = self.turns.get(identity)
                     if active and active['status'] == 'inProgress':
-                        turns = [t for t in turns if t['id'] != active['id']] + [active]
+                        turns = [t for t in turns if t['id'] != active['id']] + [copy.deepcopy(active)]
                     elif turns and turns[-1]['status'] == 'inProgress':
                         self.turns[identity] = turns[-1]
-                    for turn in turns:
-                        pending_plan = plan_update(turn) if 'plan' in turn else None
-                        for item in turn.get('items', []):
-                            if pending_plan and item['type'] != 'userMessage':
-                                await self.update(identity, pending_plan, only=ws)
-                                pending_plan = None
-                            for update in item_updates(item):
-                                await self.update(identity, update, only=ws)
-                        if pending_plan:
-                            await self.update(identity, pending_plan, only=ws)
-                    for key, pending in list(self.permissions.items()):
-                        if pending['packet']['params']['threadId'] == identity:
-                            await self.deliver_permission(key, only=ws)
-                    await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': self.session(thread)['title']}, only=ws)
+                    permissions = [self.permission_message(key) for key, pending in self.permissions.items()
+                                   if pending['packet']['params']['threadId'] == identity]
+                    title = self.session(thread)['title']
+                    def replay():
+                        for update in history_updates(turns):
+                            yield {'method': 'session/update', 'params': {'sessionId': identity, 'update': update}}
+                        yield from permissions
+                        yield {'method': 'session/update', 'params': {'sessionId': identity, 'update': {'sessionUpdate': 'session_info_update', 'title': title}}}
+                    delivery = self.delivery(ws)
+                    if delivery:
+                        delivery.replay(replay())
+                        await asyncio.sleep(0)
                     return {'_meta': {'hostRuns': [self.status(t) for t in turns], 'workspace': self.session(thread)['_meta']['workspace'],
                                       'goose': {**self.option_metadata(identity)['goose'],
                                                 'acceptedRequests': [r['id'] for r in self.journal.for_thread(identity) if r['phase'] in ('accepted', 'finished')]}}}
@@ -962,8 +1016,11 @@ class Bridge:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=16 * 1024 * 1024)
         await ws.prepare(request)
         self.clients[ws] = set()
+        self.transports[ws] = request.transport
         try:
             async for frame in ws:
+                if ws not in self.clients:
+                    break
                 if frame.type == WSMsgType.TEXT:
                     try:
                         packet = json.loads(frame.data)
@@ -973,7 +1030,7 @@ class Bridge:
                     except (ValueError, TypeError):
                         await self.send(ws, {'id': None, 'error': {'code': -32700, 'message': 'Invalid JSON request'}})
         finally:
-            self.clients.pop(ws, None)
+            self.disconnect(ws, code=1000)
         return ws
 
     async def health(self, request):
@@ -988,7 +1045,8 @@ def app(bridge):
     application.router.add_get('/acp', bridge.websocket)
     application.router.add_get('/status', bridge.health)
     async def shutdown(application):
-        await asyncio.gather(*(ws.close(code=1012, message=b'Adapter restarting; saved work continues') for ws in list(bridge.clients)), return_exceptions=True)
+        closing = [bridge.disconnect(ws, code=1012, reason='Adapter restarting; saved work continues') for ws in list(bridge.clients)]
+        await asyncio.gather(*(task for task in closing if task), return_exceptions=True)
     application.on_shutdown.append(shutdown)
     async def lifecycle(application):
         upstream = asyncio.create_task(bridge.rpc.maintain())
@@ -1000,9 +1058,10 @@ def app(bridge):
             await upstream
         with contextlib.suppress(asyncio.CancelledError):
             await notifications
-        for task in list(bridge.tasks):
+        tasks = bridge.tasks | bridge.delivery_tasks
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*bridge.tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
     application.cleanup_ctx.append(lifecycle)
     return application
 

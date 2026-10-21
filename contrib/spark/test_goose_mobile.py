@@ -20,6 +20,12 @@ class Socket:
     async def send_json(self, packet):
         self.packets.append(packet)
 
+    async def send_str(self, payload):
+        await self.send_json(json.loads(payload))
+
+    async def close(self, **kwargs):
+        self.closed = True
+
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_cause_survives_live_rpc_replay_restart_and_duplicate_receipt(self):
