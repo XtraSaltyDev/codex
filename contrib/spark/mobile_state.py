@@ -47,17 +47,21 @@ class MobileState:
                 request TEXT PRIMARY KEY, thread TEXT NOT NULL, baseline TEXT, result TEXT
             );
         ''')
+        if 'content' not in {row['name'] for row in self.db.execute('PRAGMA table_info(submissions)')}:
+            with self.db:
+                self.db.execute('ALTER TABLE submissions ADD COLUMN content TEXT')
 
-    def prepare(self, identity, thread, text):
-        digest = hashlib.sha256(text.encode()).hexdigest()
+    def prepare(self, identity, thread, text, content=None):
+        encoded = json.dumps(content, sort_keys=True, separators=(',', ':')) if content is not None else None
+        digest = hashlib.sha256((json.dumps([text, content], sort_keys=True, separators=(',', ':')) if content is not None else text).encode()).hexdigest()
         existing = self.submission(identity)
         if existing:
             if existing['thread'] != thread or existing['digest'] != digest:
                 raise ValueError('A submission ID cannot be reused for a different message.')
             return existing, False
         with self.db:
-            self.db.execute('INSERT INTO submissions(id, thread, text, digest, phase) VALUES(?,?,?,?,?)',
-                            (identity, thread, text, digest, 'prepared'))
+            self.db.execute('INSERT INTO submissions(id, thread, text, digest, phase, content) VALUES(?,?,?,?,?,?)',
+                            (identity, thread, text, digest, 'prepared', encoded))
         return self.submission(identity), True
 
     def submission(self, identity):
@@ -78,7 +82,7 @@ class MobileState:
 
     def record_event(self, thread, packet):
         method = packet['method']; params = packet.get('params', {})
-        if method not in ('turn/started', 'turn/completed', 'item/started', 'item/completed', 'item/agentMessage/delta'):
+        if method not in ('turn/started', 'turn/completed', 'turn/plan/updated', 'item/started', 'item/completed', 'item/agentMessage/delta'):
             return None
         turn_id = params.get('turnId') or params.get('turn', {}).get('id')
         row = self.db.execute('SELECT snapshot FROM turns WHERE id=?', (turn_id,)).fetchone() if turn_id else None
@@ -90,7 +94,10 @@ class MobileState:
         if not turn['id']:
             return None
         items = {i['id']: i for i in turn.get('items', [])}
-        if method.startswith('turn/'):
+        if method == 'turn/plan/updated':
+            turn['plan'] = params['plan']
+            turn['planExplanation'] = params.get('explanation')
+        elif method.startswith('turn/'):
             incoming = params['turn']
             for item in incoming.get('items', []):
                 items[item['id']] = merge_items([items[item['id']]], [item])[0] if item['id'] in items else item

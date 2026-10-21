@@ -49,6 +49,21 @@ New threads default to full access: `sandbox_mode = "danger-full-access"` and `a
 
 The model catalog selects plain function tools and terminal-based file editing. Code Mode, hosted web search, reasoning summaries, automatic child agents, ChatGPT app integrations, and plugin marketplace auto-loading are disabled in this baseline. The model uses terminal tools such as `curl` or Python to retrieve current sources and cite their URLs; OpenAI-hosted web search is not implemented by the Spark provider. `[sandbox_workspace_write] network_access = true` also preserves networking when workspace mode is explicitly selected. These choices are editable in the isolated runtime's configuration. This config does not grant a local model capabilities it cannot implement.
 
+Planning is enabled with `[tools.update_plan] enabled = true`. The Spark catalog
+adapts the upstream patch instruction to call `exec_command` with a `cmd` string
+and a quoted `apply_patch` heredoc. Codex retains its existing patch validation,
+sandbox, approvals, and file-change events. The dedicated freeform patch tool stays
+disabled so the advertised tools remain ordinary functions. The upstream prompt
+file is unchanged; the adaptation replaces only its obsolete patch-call example
+and refuses unknown or ambiguous versions of that instruction.
+
+HTTP context-limit errors use Codex's existing `ContextWindowExceeded` handling.
+This includes explicit `context_length_exceeded` codes and vLLM's HTTP 400
+`BadRequestError` for `input_tokens` with its maximum-context-length message.
+Other request errors retain their original classification. Recognized overflow
+marks the context full, and local compaction can use its existing history-trimming
+retry. A single message larger than the model context still needs to be shortened.
+
 ```sh
 systemctl --user status codex-spark-tunnel codex-spark-app-server
 journalctl --user -u codex-spark-app-server -n 50
@@ -71,6 +86,74 @@ python3 contrib/spark/install_client.py
 ```
 
 Launcher backups are stored under `~/.local/state/codex-spark/backups/launchers/`.
+
+## Model reasoning choices
+
+Setup probes the Responses reasoning levels `none`, `low`, `medium`, `high`, and
+`xhigh`. It advertises a level only after a complete answer and provider usage
+confirm that thinking is off for `none` and active for the other levels. Explicit
+reasoning-level rejections exclude that level; outages, unrelated request errors,
+ignored effort settings, and inconclusive responses leave the catalog unchanged.
+The current Spark template verifies `none`, `low`, `medium`, and `xhigh`; `high`
+is rejected. The Spark profile sets `model_reasoning_effort = "low"` for new chats;
+select `none` when no thinking is preferred. Reasoning summaries remain disabled
+independently of reasoning effort.
+
+Inspect or refresh an existing catalog:
+
+```sh
+python3 contrib/spark/model_reasoning.py
+# After running tasks finish:
+python3 contrib/spark/model_reasoning.py --refresh
+systemctl --user restart codex-spark-app-server.service codex-spark-mobile.service
+```
+
+Refresh backs up the catalog and changes only the selected model's reasoning
+choices. It preserves defaults, input modalities, tool instructions, and
+`config.toml`, and saves probe evidence in `~/.codex-spark/model-reasoning.json`.
+In the terminal model picker, select a verified level, or use
+`/model --reasoning=medium`. Direct CLI runs also accept
+`codex-spark-cli -c model_reasoning_effort='"medium"' exec "Your task"`.
+The mobile adapter continues to use the shared backend default; this change does
+not add an effort selector to the phone UI.
+
+Run `python3 contrib/spark/smoke_model_reasoning.py` to verify native request
+serialization against Spark with a disposable catalog, or add `--installed` to
+check the running app-server's advertised choices and actual per-turn reasoning
+usage. These checks disable tools and keep the production profile unchanged.
+
+## Model input capabilities
+
+The installer uses explicit `input_modalities` metadata when the provider supplies
+it. Otherwise it sends a small generated image through the configured Responses
+endpoint and verifies the model's answer. Model names and missing metadata do not
+establish text-only support. An explicit image rejection disables image input;
+network errors, authentication failures, and inconclusive answers leave capability
+detection unresolved. The fallback probe makes no claim about audio support.
+
+Inspect the configured model without changing the profile:
+
+```sh
+python3 contrib/spark/model_capabilities.py
+```
+
+To refresh an existing catalog, wait for running tasks to finish, then run:
+
+```sh
+python3 contrib/spark/model_capabilities.py --refresh
+systemctl --user restart codex-spark-app-server.service codex-spark-mobile.service
+```
+
+The refresh backs up the catalog and updates only the selected model's modalities.
+It preserves `config.toml`, credentials, and other model settings, and saves detection
+evidence in `~/.codex-spark/model-capabilities.json`. An inconclusive probe leaves the
+catalog unchanged. For a separately verified deployment, both the installer and
+refresh command accept an explicit override such as `--input-modalities text,image`.
+
+Verified image support enables native attachments and `view_image`. The mobile
+adapter reads the native model catalog and advertises the image prompt capability
+for the configured model. Provider-declared modalities are preserved in the catalog;
+the fallback probe verifies images, and the mobile adapter forwards text and images.
 
 ## Update an existing host
 
@@ -128,6 +211,19 @@ missing credentials. Normal terminal arguments continue to go to the remote clie
 New installations include it through `configure.py` and `configure_goose_mobile.py`.
 
 ## Coding acceptance
+
+Verify planning and patch handling against the live Spark model in a disposable
+project:
+
+```sh
+python3 contrib/spark/smoke_tool_profile.py
+python3 contrib/spark/smoke_tool_profile.py --installed
+```
+
+The first command uses an isolated profile. The second uses the deployed shared
+app-server without tool or prompt overrides. Both require a plan, a native patch
+event, passing fixture tests, and an unchanged test file. Reports stay under
+`~/.local/state/codex-spark/tool-profile-acceptance/`.
 
 Install the test client's dependency into an isolated directory, then run:
 

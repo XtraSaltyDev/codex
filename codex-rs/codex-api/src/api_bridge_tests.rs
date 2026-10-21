@@ -6,6 +6,109 @@ use codex_protocol::protocol::RateLimitReachedType;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn context_overflow_maps_vllm_input_token_validation_error() {
+    let body = serde_json::json!({
+        "error": {
+            "message": "This model's maximum context length is 262144 tokens. However, you requested 1 output tokens and your prompt contains at least 262144 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=262144)",
+            "type": "BadRequestError",
+            "param": "input_tokens",
+            "code": 400
+        }
+    });
+    let err = map_api_error(ApiError::Transport(TransportError::Http {
+        retry_after: None,
+        status: http::StatusCode::BAD_REQUEST,
+        url: None,
+        headers: None,
+        body: Some(body.to_string()),
+    }));
+    assert!(matches!(
+        err.details(),
+        CodexErrorDetails::ContextWindowExceeded
+    ));
+    assert_eq!(
+        err.to_codex_protocol_error(),
+        CodexErrorInfo::ContextWindowExceeded
+    );
+    assert!(err.retry_delay(/*retry_count*/ 1).is_none());
+    assert!(!err.to_string().contains("BadRequestError"));
+}
+
+#[test]
+fn context_overflow_maps_explicit_code_in_http_and_websocket_bodies() {
+    let error =
+        serde_json::json!({"code": "context_length_exceeded", "message": "Input too long."});
+    for body in [
+        serde_json::json!({"error": error}),
+        serde_json::json!({"type": "error", "status": 400, "error": error}),
+    ] {
+        let advice = RetryAfter::from_delay(std::time::Duration::from_secs(17)).unwrap();
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            retry_after: Some(advice),
+            status: http::StatusCode::BAD_REQUEST,
+            url: None,
+            headers: None,
+            body: Some(body.to_string()),
+        }));
+        assert_eq!(
+            err.to_codex_protocol_error(),
+            CodexErrorInfo::ContextWindowExceeded
+        );
+        assert_eq!(err.retry_after(), Some(advice));
+        assert!(err.retry_delay(/*retry_count*/ 1).is_none());
+    }
+}
+
+#[test]
+fn context_overflow_does_not_reclassify_other_bad_requests() {
+    let message = "This model's maximum context length is 262144 tokens. Your prompt contains 262145 input tokens.";
+    for error in [
+        serde_json::json!({"type": "BadRequestError", "param": "input_tokens", "code": 400, "message": "Input tokens must be positive."}),
+        serde_json::json!({"type": "BadRequestError", "param": "max_output_tokens", "code": 400, "message": message}),
+        serde_json::json!({"type": "BadRequestError", "code": 400, "message": message}),
+        serde_json::json!({"type": "invalid_request_error", "param": "input_tokens", "code": 400, "message": message}),
+        serde_json::json!({"type": "BadRequestError", "param": "input_tokens", "code": "invalid_argument", "message": message}),
+        serde_json::json!({"type": "BadRequestError", "param": "input_tokens", "code": 400, "message": null}),
+        serde_json::json!({"code": "unsupported_parameter", "message": "Unknown image detail."}),
+    ] {
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            retry_after: None,
+            status: http::StatusCode::BAD_REQUEST,
+            url: None,
+            headers: None,
+            body: Some(serde_json::json!({"error": error}).to_string()),
+        }));
+        assert!(
+            matches!(err.details(), CodexErrorDetails::InvalidRequest { .. }),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn context_overflow_is_only_recognized_for_bad_request_status() {
+    for status in [
+        http::StatusCode::UNAUTHORIZED,
+        http::StatusCode::FORBIDDEN,
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            retry_after: None,
+            status,
+            url: None,
+            headers: None,
+            body: Some(
+                serde_json::json!({"error": {"code": "context_length_exceeded"}}).to_string(),
+            ),
+        }));
+        assert!(!matches!(
+            err.details(),
+            CodexErrorDetails::ContextWindowExceeded
+        ));
+    }
+}
+
+#[test]
 fn map_api_error_maps_server_overloaded() {
     let err = map_api_error(ApiError::ServerOverloaded { retry_after: None });
     assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));

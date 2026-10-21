@@ -5,6 +5,15 @@ to the already-running, capability-token-authenticated Codex app-server. Codex o
 the agent, sandbox, approvals, local files, saved threads, and model requests to Spark.
 The Mac and Goose desktop are not in the phone's execution path.
 
+Image support follows the selected model's native catalog entry. When enabled,
+the ACP handshake advertises `promptCapabilities.image`, and prompts may contain
+standard [ACP image blocks](https://agentclientprotocol.com/protocol/v1/content)
+with `mimeType` and base64 `data`, with or without accompanying text. The adapter
+forwards these as native image inputs, preserves them in submission receipts, and
+replays them after reconnect or restart. Reusing a submission ID with a different
+image is rejected. PNG, JPEG, WebP, and GIF attachments may total up to 10 MiB per
+message. Unsupported content is rejected before dispatch.
+
 ## Install on ai-research
 
 After the main Spark setup, run:
@@ -14,6 +23,16 @@ python3 contrib/spark/configure_goose_mobile.py
 python3 -m unittest discover -s contrib/spark -p test_goose_mobile.py -v
 python3 contrib/spark/smoke_goose_mobile.py
 ```
+
+To verify capability detection, native attachments, `view_image`, mobile image
+answers, and replay after an adapter restart against the live model:
+
+```sh
+python3 contrib/spark/smoke_model_capabilities.py
+```
+
+This uses generated images and an isolated Codex profile and app-server. The main
+runtime configuration and conversations remain untouched.
 
 The user service is `codex-spark-mobile.service`, listening on loopback port 3285.
 Its independent mobile secret is `~/.config/codex-spark/mobile.token`, mode 0600.
@@ -44,6 +63,26 @@ WireGuard must be connected on the phone. Original Mac conversations and drafts
 stay on their original host; they are not converted into Codex conversations.
 
 ## Behavior and limits
+
+Chats share one saved Codex name across the terminal and phone. The terminal generates
+a concise name from the first message; phone-created chats now generate one in the
+background after a successful response, using the chat's configured Spark model.
+Generated names are limited to 36 characters. Hidden, ephemeral naming turns have no
+tools, MCP servers, hooks, or network access and do not enter the conversation history
+or produce task notifications. Naming failure leaves the message preview available and
+does not affect the user's task. A later successful response can try naming again.
+
+Use `/rename` in the terminal or **Rename conversation** on the phone to choose a name.
+A saved name takes precedence over automatic generation; renaming cancels a pending
+mobile naming request. Name changes stream to connected clients, and loading a chat
+refreshes its authoritative saved title after a disconnect. The current iOS app already
+supports these updates, so this change only requires the host adapter update.
+
+Run `python3 -m unittest discover -s contrib/spark -p 'test_*.py'` for deterministic
+checks. `python3 contrib/spark/smoke_thread_titles.py` exercises real Spark generation,
+native name persistence, mobile title updates, manual renaming and reconnect replay,
+and terminal-style name broadcasts through an isolated loopback adapter. It archives
+its finished fixture and saves its result under `~/.local/state/codex-spark/title-acceptance/`.
 
 Goose validates saved draft references before merging them into Recents. The authenticated
 `_goose/unstable/session/draft_states` method checks loaded chats and every page of the
@@ -85,7 +124,15 @@ external-service changes are outside this file review's scope. Overlapping work,
 interrupted captures and size limits are labeled as partial rather than attributed
 with false certainty. Snapshot files are never applied or restored to the project.
 
-Command activity now includes the recorded output and exit code. Nonzero exits are
+Live plans appear as checklists in Goose, with pending, in-progress, and completed
+steps. The adapter translates native plan events into ACP `plan` updates and saves
+the latest checklist and explanation per turn for reconnect and restart replay.
+Updates replace that turn's checklist; completion does not invent finished steps.
+
+Tool activity uses a single descriptor row, such as **Used a tool**, **Edited a
+file**, or **Searched the web**. Tap the row to inspect the original command/tool
+details and recorded output. Approval prompts retain the details needed to decide.
+Command activity includes the recorded output and exit code. Nonzero exits are
 shown as failed commands even when the surrounding turn succeeds. Output is capped
 at 24 KiB, common credential forms and terminal control sequences are filtered, and
 truncation or unconfirmed outcomes are explicit. This does not infer that an
@@ -112,12 +159,34 @@ explain a Codex outage. An unreachable host is reported with a private/VPN conne
 hint; the app does not pretend it can determine that the VPN itself is disconnected.
 Older hosts without this capability retain the existing connection behavior.
 
+Goose exposes the native model catalog and its supported reasoning levels through
+`_goose/unstable/session/check_model`. Model, reasoning, access and supported speed
+changes use `session/set_config_option` and native `thread/settings/update`. Choices
+are validated against the current catalog and rejected while that chat is running.
+Settings are saved per conversation and replayed after reconnect; the host's global
+model and low reasoning default are not rewritten. Speed choices are omitted when
+the native model advertises no service tiers, as on the current Spark model.
+
+New-chat preferences stay on the phone until the first message creates a conversation.
+The adapter validates their whitelisted `options` in `_meta.goose` before starting
+the native thread. Recovery review turns keep their separate restricted access and
+do not replace the saved access for ordinary messages.
+
+The authenticated `_goose/unstable/session/files` method supplies the Modified/All
+files browser. It reads only inside the chat's working folder, rejects traversal and
+links that escape it, and never stages, edits, or restores files. Git views distinguish
+unstaged changes (including untracked files) from staged changes. Diffs and text
+previews are bounded; binary/large files are labeled, common credentials are filtered,
+and private-key and environment credential files cannot be previewed. Markdown can
+be viewed as formatted content or raw text, searched, and shared from the phone.
+This current working-tree view is separate from the saved per-task review baselines.
+
 Supports streaming text, command/file activity, explicit allow-once/decline approvals,
 user-input forms, stop, history replay, saved-message search, rename, archive/restore,
 delete, project folders, and fresh projectless workspaces. Mobile-created Codex threads
 use legacy history mode for full ACP transcript replay. Model execution remains on
-the existing Spark provider. This adapter does not advertise a model picker; change
-the backend model through the isolated Codex Spark configuration.
+the existing Spark provider. Available model and reasoning choices come from that
+provider's native catalog.
 
 New-chat composition shows the execution host and a folder menu above the composer.
 Choose a saved project, add an existing host folder, or choose **Don't work in a
@@ -166,8 +235,8 @@ reapplied only to the same still-running turn when reconnecting. Approval IDs ar
 scoped to the upstream connection to reject stale responses after a restart.
 
 Incremental replay is not advertised. Moving an existing conversation
-to a different folder is not supported; start a new chat there instead. Attachments
-are rejected by this text-model route rather than silently discarded.
+to a different folder is not supported; start a new chat there instead. Image inputs
+are accepted only when enabled by the selected model's verified capabilities.
 
 Adapter metadata lives in `~/.local/state/codex-spark/mobile/metadata.json`; native
 Codex transcripts remain in `~/.codex-spark`. Logs are in

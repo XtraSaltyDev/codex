@@ -12,6 +12,9 @@ import subprocess
 import urllib.request
 
 from install_client import with_default_cwd, with_command_routing
+from model_capabilities import discover
+from model_reasoning import discover as discover_reasoning
+from tool_instructions import spark_instructions
 
 
 NETWORK_INSTRUCTIONS = (
@@ -46,6 +49,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-url', default='http://127.0.0.1:18384/v1')
     parser.add_argument('--model')
+    parser.add_argument('--input-modalities', help='Override detected modalities, such as text or text,image')
     parser.add_argument('--port', type=int, default=4500)
     parser.add_argument('--binary', type=Path)
     args = parser.parse_args()
@@ -71,20 +75,27 @@ def main():
         raise SystemExit('The requested model is not served by this endpoint')
     name = model['id']
     context = int(model.get('max_model_len', 131072))
+    try:
+        capabilities = discover(args.base_url, model, override=args.input_modalities)
+        reasoning = discover_reasoning(args.base_url, model)
+        if not any(option['effort'] == 'low' for option in reasoning['supported_reasoning_levels']):
+            raise ValueError('The Spark default requires verified low reasoning; no profile files were changed.')
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     catalog = {
         'models': [{
             'slug': name,
             'display_name': 'Spark / ' + name.rsplit('/', 1)[-1],
             'description': 'Self-hosted model reached through the private Spark tunnel.',
             'default_reasoning_level': None,
-            'supported_reasoning_levels': [],
+            'supported_reasoning_levels': reasoning['supported_reasoning_levels'],
             'shell_type': 'unified_exec',
             'visibility': 'list',
             'supported_in_api': True,
             'priority': 0,
             'availability_nux': None,
             'upgrade': None,
-            'model_messages': {'instructions_template': (repo / 'codex-rs/models-manager/prompt.md').read_text()},
+            'model_messages': {'instructions_template': spark_instructions((repo / 'codex-rs/models-manager/prompt.md').read_text())},
             'include_skills_usage_instructions': False,
             'include_plugin_usage_instructions': False,
             'include_apps_usage_instructions': False,
@@ -99,15 +110,18 @@ def main():
             'auto_compact_token_limit': min(200000, int(context * 0.80)),
             'effective_context_window_percent': 95,
             'experimental_supported_tools': [],
-            'input_modalities': ['text'],
+            'input_modalities': capabilities['input_modalities'],
             'node_repl_disabled': True,
             'tool_mode': 'direct',
         }]
     }
     write(runtime / 'models.json', json.dumps(catalog, indent=2) + '\n')
+    write(runtime / 'model-capabilities.json', json.dumps(capabilities, indent=2) + '\n')
+    write(runtime / 'model-reasoning.json', json.dumps(reasoning, indent=2) + '\n')
     toml = f'''# Personal runtime; separate from ~/.codex.
 model = {json.dumps(name)}
 model_provider = "spark"
+model_reasoning_effort = "low"
 model_catalog_json = {json.dumps(str(runtime / 'models.json'))}
 model_context_window = {context}
 model_auto_compact_token_limit = {min(200000, int(context * 0.80))}
@@ -116,6 +130,9 @@ sandbox_mode = "danger-full-access"
 web_search = "disabled"
 check_for_update_on_startup = false
 developer_instructions = {json.dumps(NETWORK_INSTRUCTIONS)}
+
+[tools.update_plan]
+enabled = true
 
 [sandbox_workspace_write]
 network_access = true
@@ -197,6 +214,7 @@ Categories=Development;
         'source_commit': subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip(),
         'binary_version': subprocess.check_output([str(destination), '--version'], text=True).strip(),
         'model': name, 'base_url': args.base_url, 'context_window': context,
+        'input_modalities': capabilities['input_modalities'],
         'runtime': str(runtime), 'app_server': f'ws://127.0.0.1:{args.port}',
     }
     write(state / 'installation.json', json.dumps(metadata, indent=2) + '\n')

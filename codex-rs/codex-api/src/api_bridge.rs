@@ -147,6 +147,11 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                 if status == http::StatusCode::BAD_REQUEST {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
                         && let Some(error) = parsed.get("error")
+                        && is_context_window_exceeded(error)
+                    {
+                        CodexErr::ContextWindowExceeded
+                    } else if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
+                        && let Some(error) = parsed.get("error")
                         && let Some(
                             code @ (CYBER_POLICY_ERROR_CODE
                             | BIO_POLICY_ERROR_CODE
@@ -274,6 +279,20 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg),
     }
+}
+
+fn is_context_window_exceeded(error: &Value) -> bool {
+    error.get("code").and_then(Value::as_str) == Some("context_length_exceeded")
+        || (error.get("code").and_then(Value::as_u64) == Some(400)
+            && error.get("type").and_then(Value::as_str) == Some("BadRequestError")
+            && error.get("param").and_then(Value::as_str) == Some("input_tokens")
+            && error
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    message.starts_with("This model's maximum context length is ")
+                        && message.contains("input tokens")
+                }))
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";

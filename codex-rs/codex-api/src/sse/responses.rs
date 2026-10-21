@@ -417,8 +417,12 @@ pub fn process_responses_event(
             )));
         }
         "response.completed" | "response.incomplete" => {
-            let interrupted = event.kind == "response.incomplete";
-            if interrupted {
+            // Some providers emit response.completed even when the response is incomplete.
+            let incomplete = event.kind == "response.incomplete"
+                || event.response.as_ref().is_some_and(|response| {
+                    response.get("status").and_then(Value::as_str) == Some("incomplete")
+                });
+            if incomplete {
                 let reason = event.response.as_ref().and_then(|response| {
                     response
                         .get("incomplete_details")
@@ -464,7 +468,7 @@ pub fn process_responses_event(
                             response_id: resp.id,
                             token_usage: resp.usage.map(Into::into),
                             usage_metadata: resp.usage_metadata,
-                            end_turn: if interrupted {
+                            end_turn: if incomplete {
                                 Some(false)
                             } else {
                                 resp.end_turn
@@ -752,6 +756,103 @@ mod tests {
 
     fn idle_timeout() -> Duration {
         Duration::from_millis(1000)
+    }
+
+    #[tokio::test]
+    async fn incomplete_responses_preserve_reason_id_and_usage() {
+        for kind in ["response.completed", "response.incomplete"] {
+            let terminal = json!({
+                "type": kind,
+                "response": {
+                    "id": "resp_truncated",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {
+                        "input_tokens": 31,
+                        "output_tokens": 1,
+                        "total_tokens": 32
+                    }
+                }
+            });
+            let stream = format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"1\"}}\n\nevent: {kind}\ndata: {terminal}\n\n"
+            );
+
+            let events = collect_events(&[stream.as_bytes()]).await;
+
+            assert_matches!(events.as_slice(), [
+                Ok(ResponseEvent::OutputTextDelta(text)),
+                Err(ApiError::ResponseIncomplete(error)),
+            ] if text == "1" && error.as_ref() == &ResponseIncompleteError {
+                reason: "max_output_tokens".to_string(),
+                response_id: Some("resp_truncated".to_string()),
+                token_usage: Some(TokenUsage {
+                    input_tokens: 31,
+                    output_tokens: 1,
+                    total_tokens: 32,
+                    ..TokenUsage::default()
+                }),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_without_reason_reports_unknown() {
+        let event = json!({
+            "type": "response.completed",
+            "response": {"id": "resp_incomplete", "status": "incomplete"}
+        });
+        let stream = format!("data: {event}\n\n");
+
+        let events = collect_events(&[stream.as_bytes()]).await;
+
+        assert_matches!(events.as_slice(), [Err(ApiError::ResponseIncomplete(error))]
+            if error.reason == "unknown"
+                && error.response_id.as_deref() == Some("resp_incomplete")
+                && error.token_usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn incomplete_content_filter_responses_report_content_filter() {
+        for kind in ["response.completed", "response.incomplete"] {
+            let event = json!({
+                "type": kind,
+                "response": {
+                    "id": "resp_filtered",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"}
+                }
+            });
+            let stream = format!("data: {event}\n\n");
+
+            let events = collect_events(&[stream.as_bytes()]).await;
+
+            assert_matches!(events.as_slice(), [Err(ApiError::ContentFilter)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_interrupted_responses_do_not_end_turn() {
+        for kind in ["response.completed", "response.incomplete"] {
+            let event = json!({
+                "type": kind,
+                "response": {
+                    "id": "resp_interrupted",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "interrupted"},
+                    "end_turn": true
+                }
+            });
+            let stream = format!("data: {event}\n\n");
+
+            let events = collect_events(&[stream.as_bytes()]).await;
+
+            assert_matches!(events.as_slice(), [Ok(ResponseEvent::Completed {
+                response_id,
+                end_turn: Some(false),
+                ..
+            })] if response_id == "resp_interrupted");
+        }
     }
 
     #[tokio::test]

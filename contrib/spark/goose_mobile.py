@@ -10,16 +10,21 @@ import logging
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import uuid
 
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
 from mobile_state import MobileState, merge_items
+from mobile_content import prompt_input, user_content_blocks
 from health import SparkHealth
 from spark_release import VERSION
 from work_review import capture as capture_review, finish as finish_review, visible_text
 from push_notifications import PushNotifications
+from thread_titles import ThreadTitles
+import mobile_options
+import mobile_workspace
 
 
 class RPCError(Exception):
@@ -79,6 +84,14 @@ def run_status(turn):
             'userMessageId': users[0] if users else None, 'finalMessageId': answers[-1] if answers else None}
 
 
+def plan_update(turn):
+    return {'sessionUpdate': 'plan',
+            'entries': [{'content': step['step'], 'priority': 'medium',
+                         'status': 'in_progress' if step['status'] == 'inProgress' else step['status']}
+                        for step in turn['plan']],
+            '_meta': {'goose': {'turnId': turn['id'], 'explanation': turn.get('planExplanation')}}}
+
+
 def item_update(item, completed=True):
     kind, identity = item['type'], item['id']
     if kind in ('agentMessage', 'userMessage'):
@@ -90,15 +103,27 @@ def item_update(item, completed=True):
         uncertain = bool(item.get('_mobileUncertain'))
         if uncertain:
             title = 'Outcome unconfirmed: ' + title
+        tool_kind, descriptor = {'commandExecution': ('execute', 'Used a tool'),
+                                 'fileChange': ('edit', 'Edited a file'),
+                                 'webSearch': ('search', 'Searched the web')}.get(kind, ('other', 'Used a tool'))
         completed = completed and item.get('status') != 'inProgress'
         update = {'sessionUpdate': 'tool_call_update' if completed else 'tool_call', 'toolCallId': identity,
-                  'title': visible_text(title, 4096)[0], 'status': 'failed' if uncertain or item.get('status') in ('failed', 'declined') or item.get('exitCode') not in (None, 0) else 'completed' if completed else 'in_progress'}
+                  'title': descriptor, 'kind': tool_kind, '_meta': {'goose': {'toolDetail': visible_text(title, 4096)[0]}},
+                  'status': 'failed' if uncertain or item.get('status') in ('failed', 'declined') or item.get('exitCode') not in (None, 0) else 'completed' if completed else 'in_progress'}
         if kind == 'commandExecution':
             output, truncated = visible_text(item.get('aggregatedOutput') or '')
-            update['_meta'] = {'goose': {'commandResult': {'output': output, 'exitCode': item.get('exitCode'),
-                               'truncated': truncated, 'uncertain': bool(item.get('_mobileUncertain'))}}}
+            update['_meta']['goose']['commandResult'] = {'output': output, 'exitCode': item.get('exitCode'),
+                                                        'truncated': truncated, 'uncertain': uncertain}
         return update
     return None
+
+
+def item_updates(item, completed=True):
+    if item['type'] == 'userMessage' and any(c.get('type') == 'image' for c in item.get('content', [])):
+        return [{'sessionUpdate': 'user_message_chunk', 'messageId': item['id'], 'content': content}
+                for content in user_content_blocks(item['content'])]
+    update = item_update(item, completed)
+    return [update] if update else []
 
 
 class CodexRPC:
@@ -162,6 +187,7 @@ class CodexRPC:
                     logging.warning('Codex Spark connection ended: %s', type(error).__name__)
                 finally:
                     self.ready.clear()
+                    self.bridge.titles.cancel_all()
                     self.bridge.loaded.clear()
                     for future in list(self.pending.values()):
                         if not future.done():
@@ -206,9 +232,13 @@ class Bridge:
         self.waiters = {}
         self.permissions = {}
         self.tasks = set()
+        self.titles = ThreadTitles(self)
         self.locks = {}
         self.stream_locks = {}
         self.backend = {}
+        self.model_modalities = {}
+        self.model_catalog = {}
+        self.option_defaults = {}
         self.health_probe = SparkHealth(state=self.state, upstream_url=upstream_url)
         self.root = Path(projectless_root).expanduser().resolve() if projectless_root is not None else self.state / 'chats'
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -255,7 +285,8 @@ class Bridge:
                         self.journal.phase(submission['id'], 'finished' if turn['status'] in ('completed', 'failed') else 'accepted', turn['id'])
                         matched = True
                 if not matched and submission['phase'] in ('prepared', 'dispatching') and not submission['turn'] and not active:
-                    checkpoint = {'id': submission['id'], 'status': 'backendInterrupted', 'items': [{'id': submission['id'], 'type': 'userMessage', 'content': [{'type': 'text', 'text': submission['text']}]}]}
+                    content = json.loads(submission['content']) if submission.get('content') else [{'type': 'text', 'text': submission['text']}]
+                    checkpoint = {'id': submission['id'], 'status': 'backendInterrupted', 'items': [{'id': submission['id'], 'type': 'userMessage', 'content': content}]}
                     self.journal.save_turn(identity, checkpoint)
                     self.journal.phase(submission['id'], 'unconfirmed')
                     await self.complete_review(checkpoint, interrupted=True)
@@ -276,6 +307,9 @@ class Bridge:
                     for item in current.get('items', []):
                         if item.get('status') == 'inProgress':
                             item['_mobileUncertain'] = True
+                for key in ('plan', 'planExplanation'):
+                    if key in saved:
+                        current[key] = saved[key]
                 self.turns[identity] = current
                 self.journal.save_turn(identity, current)
                 if current['status'] != 'inProgress':
@@ -290,10 +324,10 @@ class Bridge:
         if request:
             await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'acceptedRequestId': request, 'sessionSettings': self.session_settings(identity)}}})
 
-    async def start_prompt(self, ws, identity, text, request, review=False):
+    async def start_prompt(self, ws, identity, text, request, review=False, native_input=None):
         async with self.locks.setdefault(identity, asyncio.Lock()):
             try:
-                submission, fresh = self.journal.prepare(request, identity, text)
+                submission, fresh = self.journal.prepare(request, identity, text, native_input)
             except ValueError as error:
                 raise RPCError(str(error)) from error
             self.clients[ws].add(identity)
@@ -322,13 +356,17 @@ class Bridge:
                 future = asyncio.get_running_loop().create_future(); self.waiters[identity] = future
                 self.inflight[identity] = request
                 self.journal.phase(request, 'dispatching')
-                args = {'threadId': identity, 'clientUserMessageId': request, 'input': [{'type': 'text', 'text': text}]}
+                args = {'threadId': identity, 'clientUserMessageId': request, 'input': native_input if native_input is not None else [{'type': 'text', 'text': text}]}
                 if review:
                     args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly'}})
-                elif self.metadata['sessions'].get(identity, {}).get('fullAccess', False):
-                    args.update({'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'dangerFullAccess'}})
                 else:
-                    args.update({'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'workspaceWrite', 'writableRoots': [thread['cwd']], 'networkAccess': True, 'excludeTmpdirEnvVar': False, 'excludeSlashTmp': False}})
+                    settings = self.session_settings(identity)
+                    args.update(mobile_options.ACCESS[settings['access']])
+                    if settings['access'] == 'workspace':
+                        args['sandboxPolicy'] = {**args['sandboxPolicy'], 'writableRoots': [thread['cwd']]}
+                    args.update({key: value for key, value in {'model': settings['modelId'], 'effort': settings.get('reasoningEffort')}.items() if value})
+                    if 'serviceTier' in self.metadata['sessions'].get(identity, {}):
+                        args['serviceTier'] = settings.get('serviceTier')
                 try:
                     response = await self.rpc.request('turn/start', args)
                     turn = response['turn']
@@ -341,6 +379,8 @@ class Bridge:
         status = await asyncio.shield(future)
         if status == 'failed':
             raise RPCError('The Codex Spark turn failed. Saved history is available; check the host log.', -32000)
+        if status == 'completed' and not review:
+            self.titles.schedule(identity, text)
         return {'stopReason': 'end_turn' if status == 'completed' else 'cancelled', '_meta': {'goose': {'acceptedRequestId': request}}}
 
     def save(self):
@@ -372,6 +412,10 @@ class Bridge:
         await asyncio.gather(*(self.send(ws, packet) for ws in clients))
 
     async def event(self, packet):
+        if self.titles.event(packet):
+            if 'id' in packet:
+                await self.rpc.ws.send_json({'id': packet['id'], 'error': {'code': -32601, 'message': 'Title generation does not support tool or input requests'}})
+            return
         identity = packet.get('params', {}).get('threadId')
         if identity and 'id' not in packet:
             async with self.stream_locks.setdefault(identity, asyncio.Lock()):
@@ -396,6 +440,14 @@ class Bridge:
             return
         if not identity:
             return
+        if method == 'thread/settings/updated':
+            settings = params['threadSettings']
+            self.remember_settings({'thread': {'id': identity}, 'model': settings.get('model'),
+                                    'sandbox': settings.get('sandboxPolicy') if identity not in self.waiters else None,
+                                    'reasoningEffort': settings.get('effort'),
+                                    'serviceTier': settings.get('serviceTier')}, policy=True)
+            await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': self.option_metadata(identity)})
+            return
         if method == 'turn/started':
             self.push.watch(identity, params['turn']['id'])
             request = self.inflight.get(identity)
@@ -405,6 +457,8 @@ class Bridge:
             await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': self.status(params['turn'])}}})
         elif method == 'item/agentMessage/delta':
             await self.update(identity, {'sessionUpdate': 'agent_message_chunk', 'messageId': params['itemId'], 'content': {'type': 'text', 'text': params['delta']}})
+        elif method == 'turn/plan/updated':
+            await self.update(identity, plan_update(self.turns[identity]))
         elif method in ('item/started', 'item/completed'):
             item = params['item']
             if item['type'] == 'userMessage' and item.get('clientId'):
@@ -416,8 +470,7 @@ class Bridge:
                 return  # Text arrives as deltas; history replay uses authoritative completed items.
             if item['type'] == 'userMessage' and method == 'item/completed':
                 return
-            update = item_update(item, method == 'item/completed')
-            if update:
+            for update in item_updates(item, method == 'item/completed'):
                 await self.update(identity, update)
         elif method == 'turn/completed':
             turn = self.turns[identity]
@@ -444,6 +497,7 @@ class Bridge:
                 else:
                     future.set_result(turn['status'])
         elif method == 'thread/name/updated':
+            self.titles.cancel(identity)
             await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': params.get('threadName') or params.get('name') or 'New chat'})
 
     async def deliver_permission(self, key, only=None):
@@ -479,7 +533,7 @@ class Bridge:
 
     def session(self, thread, archived=False):
         meta = dict(self.metadata['sessions'].get(thread['id'], {}))
-        meta['goose'] = {'sessionSettings': self.session_settings(thread['id'])}
+        meta.update(self.option_metadata(thread['id']))
         meta.setdefault('workspace', {'kind': 'project', 'path': thread['cwd']})
         if archived:
             meta.setdefault('archivedAt', iso(thread['updatedAt']))
@@ -488,15 +542,48 @@ class Bridge:
     def session_settings(self, identity):
         meta = self.metadata['sessions'].get(identity, {})
         full = meta.get('fullAccess', False)
-        return {'access': 'full' if full else 'workspace', 'networkAccess': True,
-                'approvalPolicy': 'never' if full else 'on-request', 'modelId': meta.get('modelId')}
+        access = meta.get('access', (self.backend.get('defaultAccess') or 'full') if identity is None else 'full' if full else 'workspace')
+        return {'access': access, 'networkAccess': access != 'readOnly',
+                'approvalPolicy': 'never' if access == 'full' else 'on-request',
+                'modelId': meta.get('modelId') or (self.backend.get('modelId') if identity is None else None),
+                'reasoningEffort': meta.get('reasoningEffort') or self.option_defaults.get('reasoningEffort'),
+                'serviceTier': meta.get('serviceTier')}
 
-    def remember_settings(self, result):
+    def option_metadata(self, identity, saved=None):
+        settings = self.session_settings(identity)
+        if saved is not None:
+            settings.update({key: saved[key] for key in ('access', 'modelId', 'reasoningEffort', 'serviceTier') if key in saved})
+            settings.update({'networkAccess': settings['access'] != 'readOnly',
+                             'approvalPolicy': 'never' if settings['access'] == 'full' else 'on-request'})
+        return {'goose': {'sessionSettings': settings,
+                         'modelSelection': mobile_options.selection(self.model_catalog, self.option_defaults,
+                             saved if saved is not None else self.metadata['sessions'].get(identity, {}))}}
+
+    async def refresh_catalog(self):
+        catalog = {}
+        cursor = None
+        while True:
+            response = await self.rpc.request('model/list', {'cursor': cursor, 'limit': 100, 'includeHidden': False})
+            catalog.update({model['model']: model for model in response['data']})
+            cursor = response.get('nextCursor')
+            if not cursor:
+                break
+        self.model_catalog = catalog
+        self.model_modalities = {key: model.get('inputModalities', []) for key, model in catalog.items()}
+
+    def remember_settings(self, result, policy=False):
         meta = self.metadata['sessions'].setdefault(result['thread']['id'], {})
         if result.get('model'):
             meta['modelId'] = result['model']
-        if result.get('sandbox', {}).get('type') == 'dangerFullAccess':
-            meta['fullAccess'] = True
+        sandbox = (result.get('sandbox') or {}).get('type')
+        if sandbox in ('dangerFullAccess', 'workspaceWrite', 'readOnly') and (policy or 'access' not in meta):
+            if not policy and meta.get('fullAccess') and sandbox != 'dangerFullAccess':
+                sandbox = 'dangerFullAccess'
+            meta['access'] = {'dangerFullAccess': 'full', 'workspaceWrite': 'workspace', 'readOnly': 'readOnly'}[sandbox]
+            meta['fullAccess'] = sandbox == 'dangerFullAccess'
+        for key in ('reasoningEffort', 'serviceTier'):
+            if key in result:
+                meta[key] = result[key]
         self.save()
 
     async def ensure_loaded(self, identity, include_turns=False):
@@ -567,19 +654,72 @@ class Bridge:
         if method == 'initialize':
             await asyncio.wait_for(self.rpc.ready.wait(), 15)
             config = (await self.rpc.request('config/read', {'includeLayers': False}))['config']
+            await self.refresh_catalog()
+            self.option_defaults = {'modelId': config.get('model'), 'reasoningEffort': config.get('model_reasoning_effort'),
+                                    'providerId': config.get('model_provider', 'spark')}
             provider = config.get('model_provider', '')
             self.backend = {'kind': 'codex', 'name': 'Codex Spark', 'agentName': 'Codex Spark',
                             'executionHost': socket.gethostname(), 'modelId': config.get('model'),
+                            'inputModalities': self.model_modalities.get(config.get('model'), []),
                             'providerName': config.get('model_providers', {}).get(provider, {}).get('name', provider),
                             'defaultAccess': {'danger-full-access': 'full', 'workspace-write': 'workspace', 'read-only': 'readOnly'}.get(config.get('sandbox_mode')),
                             'approvalPolicy': config.get('approval_policy')}
             return {'protocolVersion': 1, 'agentInfo': {'name': 'Codex Spark', 'version': VERSION}, 'authMethods': [],
-                    'agentCapabilities': {'loadSession': True, 'promptCapabilities': {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
+                    'agentCapabilities': {'loadSession': True, 'promptCapabilities': {'image': True} if 'image' in self.backend['inputModalities'] else {}, 'sessionCapabilities': {'list': {}, 'delete': {}},
                                           '_meta': {'goose': {'hostOwnedRuns': True, 'restartRecovery': True, 'submissionReceipts': True, 'workspaces': True,
                                                               'workspaceAssignment': False, 'newChatWorkspaces': True, 'workspaceBrowsing': True, 'workspaceCreation': True,
-                                                              'draftSessionValidation': True,
+                                                              'draftSessionValidation': True, 'modelSelection': True, 'sessionOptions': True, 'projectFiles': True,
+                                                              'modelSelectionDefaults': self.option_metadata(None)['goose']['modelSelection'],
                                                               'backend': self.backend, 'healthStatus': True, 'customNotifications': True,
                                                               'pushNotifications': self.push.descriptor()}}}}
+        if method == '_goose/unstable/session/check_model':
+            await self.refresh_catalog()
+            if identity:
+                await self.ensure_loaded(identity)
+                return {'_meta': self.option_metadata(identity)}
+            try:
+                saved = mobile_options.validate(self.model_catalog, self.option_defaults, {}, params.get('selections', {}))
+            except ValueError as error:
+                raise RPCError(str(error)) from error
+            return {'_meta': self.option_metadata(None, saved)}
+        if method == 'session/set_config_option':
+            async with self.locks.setdefault(identity, asyncio.Lock()):
+                thread = await self.ensure_loaded(identity)
+                if identity in self.waiters or self.turns.get(identity, {}).get('status') == 'inProgress' or thread.get('status', {}).get('type') == 'active':
+                    raise RPCError('Wait for this response to finish before changing its settings.')
+                await self.refresh_catalog()
+                try:
+                    saved = mobile_options.validate(self.model_catalog, self.option_defaults,
+                        self.metadata['sessions'].get(identity, {}), {params.get('configId'): params.get('value')})
+                except ValueError as error:
+                    raise RPCError(str(error)) from error
+                args = {'threadId': identity, 'model': saved.get('modelId') or self.option_defaults.get('modelId')}
+                if saved.get('reasoningEffort'):
+                    args['effort'] = saved['reasoningEffort']
+                if 'serviceTier' in saved:
+                    args['serviceTier'] = saved['serviceTier']
+                if params.get('configId') == 'access':
+                    args.update(mobile_options.ACCESS[saved['access']])
+                    if saved['access'] == 'workspace':
+                        args['sandboxPolicy'] = {**args['sandboxPolicy'], 'writableRoots': [thread['cwd']]}
+                await self.rpc.request('thread/settings/update', args)
+                self.metadata['sessions'][identity] = saved
+                self.save()
+                await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': self.option_metadata(identity)})
+                return {'_meta': self.option_metadata(identity)}
+        if method == '_goose/unstable/session/files':
+            thread = await self.ensure_loaded(identity)
+            try:
+                action = params.get('action', 'browse')
+                if action == 'read':
+                    return await asyncio.to_thread(mobile_workspace.read, thread['cwd'], params.get('path', ''))
+                if action == 'changes':
+                    return await asyncio.to_thread(mobile_workspace.changes, thread['cwd'], params)
+                if action == 'browse':
+                    return await asyncio.to_thread(mobile_workspace.browse, thread['cwd'], params)
+                raise ValueError('Unsupported file browser action.')
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise RPCError(str(error)) from error
         if method == '_goose/unstable/notifications/register':
             try:
                 return self.push.register(params)
@@ -649,15 +789,29 @@ class Bridge:
                 if not cwd.is_dir():
                     raise RPCError('Choose an existing directory on ai-research.')
                 workspace = {'kind': 'project', 'path': str(cwd)}
-            response = await self.rpc.request('thread/start', {'cwd': str(cwd), 'approvalPolicy': 'never', 'sandbox': 'danger-full-access', 'historyMode': 'legacy'})
+            try:
+                options = mobile_options.validate(self.model_catalog, self.option_defaults, {}, params.get('_meta', {}).get('goose', {}).get('options', {}))
+            except ValueError as error:
+                raise RPCError(str(error)) from error
+            args = {'cwd': str(cwd), 'approvalPolicy': 'never', 'sandbox': 'danger-full-access', 'historyMode': 'legacy'}
+            if options.get('modelId'):
+                args['model'] = options['modelId']
+            if options.get('reasoningEffort'):
+                args['config'] = {'model_reasoning_effort': options['reasoningEffort']}
+            if 'serviceTier' in options:
+                args['serviceTier'] = options['serviceTier']
+            if options.get('access'):
+                args.update({'approvalPolicy': mobile_options.ACCESS[options['access']]['approvalPolicy'],
+                             'sandbox': {'full': 'danger-full-access', 'workspace': 'workspace-write', 'readOnly': 'read-only'}[options['access']]})
+            response = await self.rpc.request('thread/start', args)
             thread = response['thread']; identity = thread['id']
             self.loaded.add(identity); self.clients[ws].add(identity)
-            self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd), 'fullAccess': True}
+            self.metadata['sessions'][identity] = {'workspace': workspace, 'cwd': str(cwd), 'fullAccess': True, **options}
             self.remember_settings(response)
             if workspace['kind'] == 'project' and str(cwd) not in self.metadata['projects']:
                 self.metadata['projects'].append(str(cwd))
             self.save()
-            return {'sessionId': identity, '_meta': {'workingDir': str(cwd), 'workspace': workspace, 'goose': {'sessionSettings': self.session_settings(identity)}}}
+            return {'sessionId': identity, '_meta': {'workingDir': str(cwd), 'workspace': workspace, **self.option_metadata(identity)}}
         if method == 'session/load':
             self.loading.add((ws, identity))
             try:
@@ -671,28 +825,34 @@ class Bridge:
                     elif turns and turns[-1]['status'] == 'inProgress':
                         self.turns[identity] = turns[-1]
                     for turn in turns:
+                        pending_plan = plan_update(turn) if 'plan' in turn else None
                         for item in turn.get('items', []):
-                            update = item_update(item)
-                            if update:
+                            if pending_plan and item['type'] != 'userMessage':
+                                await self.update(identity, pending_plan, only=ws)
+                                pending_plan = None
+                            for update in item_updates(item):
                                 await self.update(identity, update, only=ws)
+                        if pending_plan:
+                            await self.update(identity, pending_plan, only=ws)
                     for key, pending in list(self.permissions.items()):
                         if pending['packet']['params']['threadId'] == identity:
                             await self.deliver_permission(key, only=ws)
+                    await self.update(identity, {'sessionUpdate': 'session_info_update', 'title': self.session(thread)['title']}, only=ws)
                     return {'_meta': {'hostRuns': [self.status(t) for t in turns], 'workspace': self.session(thread)['_meta']['workspace'],
-                                      'goose': {'sessionSettings': self.session_settings(identity),
+                                      'goose': {**self.option_metadata(identity)['goose'],
                                                 'acceptedRequests': [r['id'] for r in self.journal.for_thread(identity) if r['phase'] in ('accepted', 'finished')]}}}
             finally:
                 self.loading.discard((ws, identity))
         if method == 'session/prompt':
-            if any(c.get('type') != 'text' for c in params.get('prompt', [])):
-                raise RPCError('This model currently accepts text only.')
-            text = '\n'.join(c['text'] for c in params.get('prompt', []))
-            if not text.strip():
-                raise RPCError('Enter a message.')
+            model = self.metadata['sessions'].get(identity, {}).get('modelId') or self.backend.get('modelId')
+            try:
+                text, native_input = prompt_input(params.get('prompt', []), self.model_modalities.get(model, []))
+            except ValueError as error:
+                raise RPCError(str(error)) from error
             request = params.get('_meta', {}).get('goose', {}).get('requestId') or str(uuid.uuid4())
             if not isinstance(request, str) or len(request) > 128:
                 raise RPCError('Invalid submission ID.')
-            return await self.start_prompt(ws, identity, text, request)
+            return await self.start_prompt(ws, identity, text, request, native_input=native_input)
         if method == '_goose/unstable/session/submission':
             record = self.journal.submission(params['requestId'])
             if record and record['thread'] != identity:
@@ -718,6 +878,7 @@ class Bridge:
                 await self.rpc.request('turn/interrupt', {'threadId': identity, 'turnId': turn['id']})
             return {}
         if method == '_goose/unstable/session/rename':
+            self.titles.cancel(identity)
             await self.rpc.request('thread/name/set', {'threadId': identity, 'name': params['title']})
             return {}
         if method in ('_goose/unstable/session/archive', '_goose/unstable/session/unarchive', 'session/delete'):
@@ -731,6 +892,7 @@ class Bridge:
                     raise
                 await self.confirm_deleted_thread(identity, error)
             self.loaded.discard(identity)
+            self.titles.cancel(identity)
             if action == 'delete':
                 self.push.forget(identity)
                 self.metadata['sessions'].pop(identity, None)
@@ -765,7 +927,7 @@ class Bridge:
     async def websocket(self, request):
         if not hmac.compare_digest(request.headers.get('X-Secret-Key', ''), self.token):
             raise web.HTTPUnauthorized()
-        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=16 * 1024 * 1024)
         await ws.prepare(request)
         self.clients[ws] = set()
         try:

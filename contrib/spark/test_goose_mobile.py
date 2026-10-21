@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -315,6 +317,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_reports_backend_without_exposing_provider_credentials(self):
         self.bridge.rpc.ready.set()
         async def request(method, params):
+            if method == 'model/list':
+                return {'data': [{'model': 'provider/model-a', 'inputModalities': ['text', 'image']}], 'nextCursor': None}
             self.assertEqual(method, 'config/read')
             return {'config': {'model': 'provider/model-a', 'model_provider': 'spark',
                                'model_providers': {'spark': {'name': 'DGX Spark', 'api_key': 'private-key'}},
@@ -323,6 +327,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         result = await self.bridge.dispatch(self.phone, 'initialize', {})
         meta = result['agentCapabilities']['_meta']['goose']
         self.assertEqual(meta['backend']['modelId'], 'provider/model-a')
+        self.assertEqual(meta['backend']['inputModalities'], ['text', 'image'])
+        self.assertEqual(result['agentCapabilities']['promptCapabilities'], {'image': True})
         self.assertEqual(meta['backend']['defaultAccess'], 'full')
         self.assertEqual(meta['backend']['providerName'], 'DGX Spark')
         self.assertFalse(meta['workspaceAssignment'])
@@ -331,6 +337,78 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(meta['draftSessionValidation'])
         self.assertNotIn('private-key', str(result))
         self.assertNotIn('api_key', str(result))
+
+    async def test_capabilities_follow_selected_model_across_catalog_pages(self):
+        self.bridge.rpc.ready.set()
+        async def request(method, params):
+            if method == 'config/read':
+                return {'config': {'model': 'text-model'}}
+            self.assertEqual(method, 'model/list')
+            if not params.get('cursor'):
+                return {'data': [{'model': 'text-model', 'inputModalities': ['text']}], 'nextCursor': 'page2'}
+            return {'data': [{'model': 'vision-model', 'inputModalities': ['text', 'image']}], 'nextCursor': None}
+        self.bridge.rpc.request = request
+        result = await self.bridge.dispatch(self.phone, 'initialize', {})
+        self.assertEqual(result['agentCapabilities']['promptCapabilities'], {})
+        self.assertEqual(self.bridge.backend['inputModalities'], ['text'])
+        self.assertEqual(self.bridge.model_modalities['vision-model'], ['text', 'image'])
+        with self.assertRaisesRegex(RPCError, 'not enabled'):
+            await self.bridge.dispatch(self.phone, 'session/prompt', {'sessionId': 'thread-a',
+                'prompt': [{'type': 'image', 'mimeType': 'image/png', 'data': 'aW1hZ2U='}]})
+
+    async def test_image_receipt_dispatches_once_and_replays_after_disconnect(self):
+        image = {'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(b'image one').decode()}
+        self.bridge.backend = {'modelId': 'vision'}
+        self.bridge.model_modalities = {'vision': ['text', 'image']}
+        self.bridge.titles.schedule = lambda *args: None
+        calls = []
+        started = asyncio.Event()
+        async def loaded(identity, include_turns=False):
+            return {'id': identity, 'cwd': '/tmp', 'updatedAt': 1, 'status': {'type': 'idle'}, 'turns': self.bridge.saved_history(identity, {})}
+        async def request(method, params):
+            calls.append((method, params))
+            turn = {'id': 'image-turn', 'status': 'inProgress', 'items': [
+                {'id': 'user-image', 'clientId': 'image-request', 'type': 'userMessage', 'content': params['input']}]}
+            await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': turn}})
+            started.set()
+            return {'turn': turn}
+        self.bridge.ensure_loaded = loaded
+        self.bridge.rpc.request = request
+        params = {'sessionId': 'thread-a', 'prompt': [image], '_meta': {'goose': {'requestId': 'image-request'}}}
+        first = asyncio.create_task(self.bridge.dispatch(self.phone, 'session/prompt', params))
+        await started.wait()
+        second = asyncio.create_task(self.bridge.dispatch(self.phone, 'session/prompt', params))
+        await asyncio.sleep(0)
+        await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': 'image-turn', 'status': 'completed', 'items': []}}})
+        self.assertEqual((await first)['stopReason'], 'end_turn')
+        self.assertEqual((await second)['stopReason'], 'end_turn')
+        self.assertEqual((await self.bridge.dispatch(self.phone, 'session/prompt', params))['stopReason'], 'end_turn')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]['input'][0]['type'], 'image')
+        self.assertEqual(calls[0][1]['input'][0]['detail'], 'auto')
+        changed = {**params, 'prompt': [{**image, 'data': base64.b64encode(b'image two').decode()}]}
+        with self.assertRaisesRegex(RPCError, 'different message'):
+            await self.bridge.dispatch(self.phone, 'session/prompt', changed)
+        self.phone.packets.clear()
+        await self.bridge.dispatch(self.phone, 'session/load', {'sessionId': 'thread-a'})
+        images = [p['params']['update']['content'] for p in self.phone.packets if p.get('params', {}).get('update', {}).get('content', {}).get('type') == 'image']
+        self.assertEqual(images, [image])
+
+    async def test_uncertain_image_submission_preserves_attachment_without_retransmission(self):
+        native = [{'type': 'image', 'url': 'data:image/png;base64,aW1hZ2U=', 'detail': 'auto'}]
+        self.bridge.journal.prepare('uncertain-image', 'thread-a', '[Image]', native)
+        self.bridge.journal.phase('uncertain-image', 'dispatching')
+        calls = []
+        async def request(method, params):
+            calls.append(method)
+            self.assertEqual(method, 'thread/resume')
+            return {'thread': {'id': 'thread-a', 'turns': [], 'status': {'type': 'idle'}}}
+        self.bridge.rpc.call = request
+        await self.bridge.reconcile()
+        self.assertEqual(calls, ['thread/resume'])
+        self.assertEqual(self.bridge.journal.submission('uncertain-image')['phase'], 'unconfirmed')
+        saved = self.bridge.journal.turns('thread-a')[0]['snapshot']['items'][0]['content']
+        self.assertEqual(saved, native)
 
     def test_existing_chat_does_not_inherit_new_full_access_default(self):
         self.bridge.backend = {'defaultAccess': 'full', 'modelId': 'host-default'}
@@ -417,6 +495,71 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         saved = self.bridge.journal.turns('thread-a')[0]['snapshot']
         self.assertEqual([i['id'] for i in saved['items']], ['tool', 'answer'])
 
+    async def test_plan_updates_replace_steps_and_replay_after_restart(self):
+        user = {'type': 'userMessage', 'id': 'user', 'content': [{'type': 'text', 'text': 'Work'}]}
+        await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': {'id': 'plan-turn', 'status': 'inProgress', 'items': [user]}}})
+        for status in ('inProgress', 'completed'):
+            await self.bridge.event({'method': 'turn/plan/updated', 'params': {'threadId': 'thread-a', 'turnId': 'plan-turn',
+                'explanation': 'Checking the result', 'plan': [{'step': 'Inspect', 'status': status}]}})
+        await self.bridge.event({'method': 'turn/completed', 'params': {'threadId': 'thread-a', 'turn': {'id': 'plan-turn', 'status': 'completed',
+            'items': [{'id': 'answer', 'type': 'agentMessage', 'text': 'Done'}]}}})
+        live = [p['params']['update'] for p in self.phone.packets if p['params']['update']['sessionUpdate'] == 'plan']
+        self.assertEqual([u['entries'][0]['status'] for u in live], ['in_progress', 'completed'])
+        self.assertEqual(live[-1]['_meta']['goose'], {'turnId': 'plan-turn', 'explanation': 'Checking the result'})
+        token = Path(self.temp.name) / 'token'
+        restored = Bridge(self.bridge.state, token, token, push_config=Path(self.temp.name) / 'no-push.json')
+        self.addCleanup(restored.journal.close)
+        restored.clients[self.phone] = set()
+        async def loaded(identity, include_turns=False):
+            return {'id': identity, 'cwd': '/tmp', 'updatedAt': 1, 'turns': []}
+        restored.ensure_loaded = loaded
+        self.phone.packets.clear()
+        await restored.dispatch(self.phone, 'session/load', {'sessionId': 'thread-a'})
+        updates = [p['params']['update'] for p in self.phone.packets]
+        self.assertEqual([u['sessionUpdate'] for u in updates[:3]], ['user_message_chunk', 'plan', 'agent_message_chunk'])
+        self.assertEqual(updates[1], live[-1])
+
+    async def test_plan_reconnect_observes_latest_update_without_duplicates(self):
+        async def loaded(identity, include_turns=False):
+            for turn_id, plan in [('old', [{'step': 'Earlier', 'status': 'completed'}]), ('new', [])]:
+                await self.bridge.event({'method': 'turn/plan/updated', 'params': {'threadId': identity, 'turnId': turn_id, 'plan': plan}})
+            return {'id': identity, 'cwd': '/tmp', 'updatedAt': 1, 'turns': []}
+        self.bridge.ensure_loaded = loaded
+        await self.bridge.dispatch(self.phone, 'session/load', {'sessionId': 'thread-a'})
+        plans = [p['params']['update'] for p in self.phone.packets if p['params']['update']['sessionUpdate'] == 'plan']
+        self.assertEqual([p['_meta']['goose']['turnId'] for p in plans], ['old', 'new'])
+        self.assertEqual(plans[-1]['entries'], [])
+
+    async def test_native_reconcile_preserves_saved_plan(self):
+        saved = {'id': 'plan-turn', 'status': 'inProgress', 'items': [],
+                 'plan': [{'step': 'Inspect', 'status': 'inProgress'}], 'planExplanation': 'Checking'}
+        self.bridge.journal.save_turn('thread-a', saved)
+        async def request(method, params):
+            return {'thread': {'id': 'thread-a', 'status': {'type': 'idle'},
+                               'turns': [{'id': 'plan-turn', 'status': 'completed', 'items': []}]}}
+        self.bridge.rpc.call = request
+        await self.bridge.reconcile()
+        turn = self.bridge.journal.turns('thread-a')[0]['snapshot']
+        self.assertEqual(turn['status'], 'completed')
+        self.assertEqual(turn['plan'], saved['plan'])
+        self.assertEqual(turn['planExplanation'], 'Checking')
+
+    def test_tool_descriptors_keep_details_out_of_stream_title(self):
+        for kind, descriptor in [('commandExecution', 'Used a tool'), ('fileChange', 'Edited a file'),
+                                 ('webSearch', 'Searched the web'), ('mcpToolCall', 'Used a tool')]:
+            item = {'id': 'tool', 'type': kind, 'command': 'printf private-command', 'status': 'inProgress',
+                    'aggregatedOutput': 'private-output'}
+            started = item_update(item, False)
+            self.assertEqual(started['title'], descriptor)
+            self.assertEqual(started['status'], 'in_progress')
+            self.assertEqual(started['_meta']['goose']['toolDetail'], 'printf private-command')
+            finished = item_update({**item, 'status': 'completed', 'exitCode': 1})
+            self.assertEqual(finished['title'], descriptor)
+            self.assertEqual(finished['toolCallId'], started['toolCallId'])
+            self.assertEqual(finished['status'], 'failed')
+            if kind == 'commandExecution':
+                self.assertEqual(finished['_meta']['goose']['commandResult']['output'], 'private-output')
+
     async def test_reconnect_does_not_duplicate_deltas_during_history_read(self):
         self.bridge.turns['thread-a'] = {'id': 'turn-a', 'status': 'inProgress', 'items': [{'id': 'answer', 'type': 'agentMessage', 'text': 'Before'}]}
         self.bridge.journal.save_turn('thread-a', self.bridge.turns['thread-a'])
@@ -433,6 +576,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
         async def loaded(identity, include_turns=False):
             return {'cwd': '/tmp', 'status': {'type': 'idle'}}
         async def request(method, params):
+            if method == 'thread/read':
+                return {'thread': {'name': 'Existing title'}}
             calls.append((method, params))
             turn = {'id': 'once', 'status': 'inProgress', 'items': []}
             await self.bridge.event({'method': 'turn/started', 'params': {'threadId': 'thread-a', 'turn': turn}})
