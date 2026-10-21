@@ -4344,6 +4344,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-template",
  "pretty_assertions",
+ "sha2 0.10.9",
  "tracing",
 ]
 

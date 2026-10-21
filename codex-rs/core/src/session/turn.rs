@@ -1677,6 +1677,12 @@ pub(crate) fn build_prompt(
     incremental_tools: bool,
 ) -> Prompt {
     let turn_context = &step_context.turn;
+    let base_instructions = codex_prompts::upgrade_spark_model_instructions(
+        &turn_context.config.model_provider_id,
+        &step_context.settings.model_info.slug,
+        base_instructions,
+        &codex_prompts::render_model_instructions(&step_context.settings.model_info),
+    );
     Prompt {
         input,
         tools: if incremental_tools {

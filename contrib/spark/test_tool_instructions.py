@@ -1,5 +1,6 @@
 import io
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import tomllib
@@ -11,6 +12,15 @@ from tool_instructions import PATCH_GUIDANCE, spark_instructions
 
 
 class ToolInstructionTests(unittest.TestCase):
+    def test_released_prompt_revisions_match_native_upgrade_registry(self):
+        repo = Path(__file__).resolve().parents[2]
+        base = (repo / 'codex-rs/models-manager/prompt.md').read_text()
+        registry = (repo / 'codex-rs/prompts/src/spark_instructions.rs').read_text()
+        fixture = (repo / 'codex-rs/prompts/templates/spark/patch-guidance-v2.txt').read_text().rstrip('\n')
+        self.assertEqual(fixture, PATCH_GUIDANCE)
+        for text in (base, spark_instructions(base)):
+            self.assertIn(hashlib.sha256(text.encode()).hexdigest(), registry)
+
     def test_adaptation_preserves_other_instructions_and_is_idempotent(self):
         base = (Path(__file__).resolve().parents[2] / 'codex-rs/models-manager/prompt.md').read_text()
         old_line = next(line for line in base.splitlines() if line.startswith('- Use the `apply_patch` tool to edit files'))

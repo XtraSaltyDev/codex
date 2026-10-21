@@ -212,6 +212,23 @@ New installations include it through `configure.py` and `configure_goose_mobile.
 
 ## Coding acceptance
 
+Existing chats receive newer approved Spark stock prompts when resumed and when
+building a model request. The native guard requires provider `spark`, model-owned
+provenance for the same model, and exact SHA-256 matches in the ordered revision
+registry in `codex-rs/prompts/src/spark_instructions.rs`. Custom or modified prompts,
+unknown provenance, other providers/models, and downgrades are preserved. The
+upgrade changes the model request, without rewriting saved history, developer
+instructions, or AGENTS.md content. Add each released stock prompt fingerprint as
+a new revision before shipping future prompt changes; keep earlier fingerprints.
+
+`smoke_prompt_upgrade.py --report-dir /tmp/prompt-upgrade-check` creates disposable
+legacy/custom chats and archives them before seeding only the legacy fixture's
+saved prompt metadata. It waits for a `deployed` file before forwarding actual
+requests to Spark and checking their model-visible instructions. Its `ready.json`
+supplies chat IDs for the focused iPhone UI test. After that test, create `release`
+to verify saved history prefixes and fixture tests, delete both chats and folders,
+remove automatic trust entries, and check unchanged production inventory/profile.
+
 Recovery review is consumed atomically with native acceptance, rather than when
 the phone taps Review. Preflight failures and explicit native rejections leave a
 prepared receipt available for manual retry, including after reconnect/restart.

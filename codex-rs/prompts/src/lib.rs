@@ -7,6 +7,7 @@ mod permissions_instructions;
 mod realtime;
 mod review_exit;
 mod review_request;
+mod spark_instructions;
 mod update_plan_instructions;
 
 pub use compact::SUMMARIZATION_PROMPT;
@@ -34,4 +35,5 @@ pub use review_request::ResolvedReviewRequest;
 pub use review_request::resolve_review_request;
 pub use review_request::review_prompt;
 pub use review_request::user_facing_hint;
+pub use spark_instructions::upgrade_spark_model_instructions;
 pub use update_plan_instructions::without_update_plan_instructions;

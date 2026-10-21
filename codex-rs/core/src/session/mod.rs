@@ -832,7 +832,17 @@ impl Session {
         let base_instructions = config
             .base_instructions
             .clone()
-            .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
+            .or_else(|| {
+                conversation_history.get_base_instructions().map(|saved| {
+                    codex_prompts::upgrade_spark_model_instructions(
+                        &config.model_provider_id,
+                        &model_info.slug,
+                        saved,
+                        &render_model_instructions(&model_info),
+                    )
+                    .text
+                })
+            })
             .unwrap_or_else(|| render_model_instructions(&model_info));
 
         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
