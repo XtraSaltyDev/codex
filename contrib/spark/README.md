@@ -212,6 +212,29 @@ New installations include it through `configure.py` and `configure_goose_mobile.
 
 ## Coding acceptance
 
+Recovery review is consumed atomically with native acceptance, rather than when
+the phone taps Review. Preflight failures and explicit native rejections leave a
+prepared receipt available for manual retry, including after reconnect/restart.
+An uncertain dispatch remains protected against resubmission. Native started
+events, responses and reconciled user-message receipts can confirm acceptance.
+Older prematurely consumed checkpoints are repaired when their prepared receipt
+proves dispatch never began. Review always uses read-only access and never grants
+permission to repeat interrupted commands.
+
+```sh
+python3 contrib/spark/smoke_recovery_review.py --report-dir /tmp/recovery-review-check
+```
+
+This creates one temporary folder and one disposable chat without adding a mobile
+project. Real Spark appends one fixture marker, then native interruption creates a
+saved checkpoint.
+Temporarily archiving only that chat forces a real launch failure. After restoring
+it, Review must succeed exactly once without appending the marker again. The check
+deletes the chat and folder, removes its automatic native trust entry, and verifies
+unchanged chat/project inventory and profile/binary hashes. For physical-phone
+acceptance, `--hold 900` waits for `arm`, `restore` and `release` files in the report
+directory at the UI test's three stages.
+
 Each mobile connection has one ordered sender, independent of the native reader.
 Failed or backlogged senders are disconnected without interrupting their runs.
 The live queue is capped at 256 messages or 16 MiB, including the in-flight message;

@@ -17,7 +17,7 @@ import uuid
 
 sys.path.insert(0, str(Path.home() / '.local/share/codex-spark/mobile-python'))
 from aiohttp import ClientSession, WSMsgType, web
-from mobile_state import MobileState, merge_items
+from mobile_state import MobileState, merge_items, REVIEW_PROMPT_PREFIX
 from mobile_content import prompt_input, user_content_blocks
 from health import SparkHealth
 from spark_release import VERSION
@@ -34,6 +34,14 @@ class RPCError(Exception):
         super().__init__(message)
         self.code = code
         self.data = data
+
+
+class RPCRejected(RPCError):
+    """The native server explicitly rejected the request before acceptance."""
+
+
+class RPCNotSent(RPCError):
+    """No native socket write was attempted."""
 
 
 def iso(timestamp=None):
@@ -177,10 +185,15 @@ class CodexRPC:
         self.epoch = str(uuid.uuid4())
 
     async def request(self, method, params):
-        await asyncio.wait_for(self.ready.wait(), 15)
+        try:
+            await asyncio.wait_for(self.ready.wait(), 15)
+        except TimeoutError as error:
+            raise RPCNotSent('Codex Spark is not connected. Reconnect and try again.', -32010) from error
         return await self.call(method, params)
 
     async def call(self, method, params):
+        if self.ws is None or self.ws.closed:
+            raise RPCNotSent('Codex Spark is not connected. Reconnect and try again.', -32010)
         self.number += 1
         identity = self.number
         future = asyncio.get_running_loop().create_future()
@@ -201,7 +214,7 @@ class CodexRPC:
                 if future and not future.done():
                     if 'error' in packet:
                         error = packet['error']
-                        future.set_exception(RPCError(error['message'], error['code']))
+                        future.set_exception(RPCRejected(error['message'], error['code']))
                     else:
                         future.set_result(packet.get('result', {}))
             else:
@@ -295,8 +308,9 @@ class Bridge:
             status['workReview'] = result
         if turn['status'] == 'backendInterrupted':
             record = next((r for r in self.journal.turns() if r['id'] == turn['id']), None)
+            review = self.journal.review_submission(turn['id'], record['thread']) if record else None
             tools = [i for i in turn.get('items', []) if item_update(i) and i['type'] not in ('userMessage', 'agentMessage')]
-            status['recovery'] = {'runId': turn['id'], 'canResume': bool(record and not record['reviewed']), 'readOnlyReview': True,
+            status['recovery'] = {'runId': turn['id'], 'canResume': bool(record and not record['reviewed'] and (not review or review['phase'] == 'prepared')), 'readOnlyReview': True,
                                   'completedTools': sum(i.get('status') == 'completed' for i in tools),
                                   'uncertainTools': max(1, sum(bool(i.get('_mobileUncertain')) for i in tools))}
         return status
@@ -330,6 +344,11 @@ class Bridge:
                         self.journal.phase(submission['id'], 'finished' if turn['status'] in ('completed', 'failed') else 'accepted', turn['id'])
                         matched = True
                 if not matched and submission['phase'] in ('prepared', 'dispatching') and not submission['turn'] and not active:
+                    review = self.journal.review_submission(submission['id'][7:], identity) if submission['id'].startswith('review-') else None
+                    if review:
+                        if submission['phase'] == 'dispatching':
+                            self.journal.phase(submission['id'], 'unconfirmed')
+                        continue
                     content = json.loads(submission['content']) if submission.get('content') else [{'type': 'text', 'text': submission['text']}]
                     checkpoint = {'id': submission['id'], 'status': 'backendInterrupted', 'items': [{'id': submission['id'], 'type': 'userMessage', 'content': content}]}
                     self.journal.save_turn(identity, checkpoint)
@@ -420,7 +439,15 @@ class Bridge:
                     if self.journal.submission(request)['phase'] != 'finished':
                         self.journal.phase(request, 'accepted', turn['id'])
                     await self.acknowledge(identity, request)
-                except Exception:
+                except Exception as error:
+                    if review:
+                        if isinstance(error, (RPCRejected, RPCNotSent)):
+                            self.journal.retry_rejected_review(request)
+                        submission = self.journal.submission(request)
+                        if submission['phase'] in ('prepared', 'dispatching', 'unconfirmed'):
+                            saved = next((r['snapshot'] for r in self.journal.turns(identity) if 'review-' + r['id'] == request), None)
+                            if saved:
+                                await self.update(identity, {'sessionUpdate': 'session_info_update', '_meta': {'goose': {'hostRun': self.status(saved)}}})
                     self.waiters.pop(identity, None); self.inflight.pop(identity, None)
                     raise
         turn = await asyncio.shield(future)
@@ -949,11 +976,10 @@ class Bridge:
             saved = record['snapshot']
             checkpoint = json.dumps(saved, ensure_ascii=False)
             goal = next((r['text'] for r in self.journal.for_thread(identity) if r['turn'] == saved['id'] or r['id'] == saved['id']), '')
-            text = ('Review this interrupted task using read-only inspection. Do not repeat any previous command, apply patches, change files, restart services, or perform network mutations. '
+            text = (REVIEW_PROMPT_PREFIX + ' Do not repeat any previous command, apply patches, change files, restart services, or perform network mutations. '
                     'Report which actions are confirmed complete and which outcomes remain uncertain. Check actual file/service state where possible. '
                     'Then explain the next step and wait for the user to give a new instruction. This is a recovery review, not permission to re-execute work.\n'
                     + 'Original task: ' + goal + '\nSaved checkpoint: ' + checkpoint)
-            self.journal.reviewed(saved['id'])
             return await self.start_prompt(ws, identity, text, 'review-' + saved['id'], review=True)
         if method == 'session/cancel':
             turn = self.turns.get(identity)

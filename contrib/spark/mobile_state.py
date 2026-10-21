@@ -7,6 +7,8 @@ import sqlite3
 
 from work_review import visible_text
 
+REVIEW_PROMPT_PREFIX = 'Review this interrupted task using read-only inspection.'
+
 
 def merge_items(native, saved):
     items = {}
@@ -52,6 +54,13 @@ class MobileState:
         if 'content' not in {row['name'] for row in self.db.execute('PRAGMA table_info(submissions)')}:
             with self.db:
                 self.db.execute('ALTER TABLE submissions ADD COLUMN content TEXT')
+        # Older adapters consumed the checkpoint before even loading its thread.
+        # A prepared receipt without a native turn proves that dispatch never began.
+        with self.db:
+            self.db.execute('''UPDATE turns SET reviewed=0 WHERE reviewed=1 AND EXISTS (
+                SELECT 1 FROM submissions s WHERE s.id='review-' || turns.id
+                AND s.thread=turns.thread AND s.phase='prepared' AND s.turn IS NULL
+                AND s.text LIKE ?)''', (REVIEW_PROMPT_PREFIX + '%',))
 
     def prepare(self, identity, thread, text, content=None):
         encoded = json.dumps(content, sort_keys=True, separators=(',', ':')) if content is not None else None
@@ -73,6 +82,25 @@ class MobileState:
     def phase(self, identity, phase, turn=None):
         with self.db:
             self.db.execute('UPDATE submissions SET phase=?, turn=COALESCE(?,turn) WHERE id=?', (phase, turn, identity))
+            if identity.startswith('review-') and phase in ('accepted', 'finished'):
+                self.db.execute('''UPDATE turns SET reviewed=1 WHERE id=? AND EXISTS (
+                    SELECT 1 FROM submissions s WHERE s.id=? AND s.thread=turns.thread
+                    AND s.turn IS NOT NULL AND s.text LIKE ?)''',
+                    (identity[7:], identity, REVIEW_PROMPT_PREFIX + '%'))
+
+    def review_submission(self, turn, thread):
+        record = self.submission('review-' + turn)
+        return record if record and record['thread'] == thread and record['text'].startswith(REVIEW_PROMPT_PREFIX) else None
+
+    def retry_rejected_review(self, request):
+        record = self.submission(request)
+        if not record or not request.startswith('review-') or not record['text'].startswith(REVIEW_PROMPT_PREFIX) or record['phase'] != 'dispatching' or record['turn']:
+            return False
+        with self.db:
+            self.db.execute("UPDATE submissions SET phase='prepared' WHERE id=?", (request,))
+            self.db.execute('UPDATE turns SET reviewed=0 WHERE id=? AND thread=?', (request[7:], record['thread']))
+            self.db.execute('DELETE FROM work_reviews WHERE request=?', (request,))
+        return True
 
     def for_thread(self, thread):
         return [dict(r) for r in self.db.execute('SELECT * FROM submissions WHERE thread=? ORDER BY created,rowid', (thread,))]
